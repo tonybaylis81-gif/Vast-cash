@@ -54,7 +54,7 @@ def alpaca_headers():
 
 
 def period_start(period):
-    days = {"6mo": 190, "1y": 370, "2y": 740, "3y": 1100, "5y": 1850}
+    days = {"3mo": 95, "6mo": 190, "1y": 370, "2y": 740, "3y": 1100, "5y": 1850}
     return (datetime.now(timezone.utc) - timedelta(days=days[period])).date().isoformat()
 
 
@@ -173,9 +173,9 @@ col1, col2, col3 = st.columns(3)
 with col1:
     capital = st.number_input("Starting money", min_value=100.0, value=1000.0, step=100.0)
 with col2:
-    period = st.selectbox("Test period", ["6mo", "1y", "2y", "3y", "5y"], index=1)
+    period = st.selectbox("Test period", ["3mo", "6mo", "1y", "2y", "3y", "5y"], index=1)
 with col3:
-    hold_days = st.number_input("Maximum hold (trading days)", min_value=1, max_value=252, value=6, step=1)
+    hold_days = st.number_input("Maximum hold (trading days)", min_value=1, max_value=30, value=6, step=1)
 
 stock_text = st.text_area("Stocks to test (up to 10, one per line)", "AAPL\nMSFT\nNVDA\nAMZN\nMETA\nGOOGL\nTSLA\nAMD\nAVGO\nJPM", height=150)
 stocks = list(dict.fromkeys(s.strip().upper() for s in stock_text.replace(",", "\n").splitlines() if s.strip()))[:10]
