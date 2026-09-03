@@ -10,20 +10,39 @@ PAPER_ONLY = True
 ALPACA_TRADE_URL = "https://paper-api.alpaca.markets"
 ALPACA_DATA_URL = "https://data.alpaca.markets"
 
-# Accept the exact names used by the app plus common names, so a naming mismatch
-# in Streamlit Secrets does not silently break the broker connection.
+
+def _find_secret_in_mapping(mapping, wanted_names):
+    """Find a secret by name at the root or inside any TOML section."""
+    wanted = {str(x).strip().upper() for x in wanted_names}
+    try:
+        for key, value in mapping.items():
+            if str(key).strip().upper() in wanted and value is not None:
+                text = str(value).strip()
+                if text:
+                    return text
+            if isinstance(value, dict):
+                found = _find_secret_in_mapping(value, wanted_names)
+                if found:
+                    return found
+    except Exception:
+        pass
+    return None
+
+
 def get_secret(*names):
+    # Streamlit supports both root-level secrets and nested TOML sections.
+    try:
+        found = _find_secret_in_mapping(st.secrets, names)
+        if found:
+            return found
+    except Exception:
+        pass
     for name in names:
-        try:
-            value = st.secrets.get(name)
-            if value is not None and str(value).strip():
-                return str(value).strip()
-        except Exception:
-            pass
         value = os.getenv(name)
         if value is not None and str(value).strip():
             return str(value).strip()
     return None
+
 
 def alpaca_credentials():
     return (
@@ -31,37 +50,40 @@ def alpaca_credentials():
         get_secret("ALPACA_SECRET_KEY", "ALPACA_API_SECRET", "API_SECRET", "SECRET_KEY"),
     )
 
+
 def alpaca_headers():
     key, secret = alpaca_credentials()
     if not key or not secret:
         return None
     return {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
 
+
 def alpaca_account():
     headers = alpaca_headers()
     if not headers:
-        key, secret = alpaca_credentials()
-        missing = []
-        if not key: missing.append("API key")
-        if not secret: missing.append("secret key")
-        return None, "Streamlit Secrets could not find your Alpaca " + " and ".join(missing) + "."
+        return None, "Streamlit Secrets could not find your Alpaca API key and secret key."
     try:
         r = requests.get(f"{ALPACA_TRADE_URL}/v2/account", headers=headers, timeout=15)
         if r.status_code != 200:
-            try: detail = r.json().get("message", r.text[:300])
-            except Exception: detail = r.text[:300]
+            try:
+                detail = r.json().get("message", r.text[:300])
+            except Exception:
+                detail = r.text[:300]
             return None, f"Alpaca PAPER rejected the credentials (HTTP {r.status_code}): {detail}"
         return r.json(), None
     except Exception as exc:
         return None, f"Could not reach Alpaca PAPER: {exc}"
 
+
 def period_start(period):
     days = {"6mo": 190, "1y": 370, "2y": 740, "3y": 1100, "5y": 1850}
     return (datetime.now(timezone.utc) - timedelta(days=days.get(period, 370))).date().isoformat()
 
+
 def load_history(symbol, period="1y"):
     headers = alpaca_headers()
-    if not headers: return None, "Alpaca credentials are unavailable to the app."
+    if not headers:
+        return None, "Alpaca credentials are unavailable to the app."
     params = {"timeframe":"1Day", "start":period_start(period), "end":datetime.now(timezone.utc).date().isoformat(), "limit":10000, "adjustment":"all", "feed":"iex", "sort":"asc"}
     try:
         bars=[]; token=None
@@ -84,12 +106,14 @@ def load_history(symbol, period="1y"):
         return df,None
     except Exception as exc: return None,f"Alpaca market-data error: {exc}"
 
+
 def indicators(df,end=None):
     d=df if end is None else df.iloc[:end]; c=d["close"]
     if len(c)<51: return None
     sma20=c.rolling(20).mean().iloc[-1]; sma50=c.rolling(50).mean().iloc[-1]
     momentum=(c.iloc[-1]/c.iloc[-21]-1)*100; volatility=c.pct_change().rolling(20).std().iloc[-1]*math.sqrt(252)*100; av=d["volume"].rolling(20).mean().iloc[-1]
     return {"price":float(c.iloc[-1]),"sma20":float(sma20),"sma50":float(sma50),"momentum20":float(momentum),"volatility":float(volatility),"volume_ratio":float(d["volume"].iloc[-1]/av if av else 0)}
+
 
 def maxprofit(ind):
     score=50; reasons=[]
@@ -105,12 +129,14 @@ def maxprofit(ind):
     score=max(0,min(100,score)); signal="BUY" if score>=70 else "SELL" if score<=35 else "HOLD"
     return {"signal":signal,"score":score,"reasons":reasons}
 
+
 def risk_gate(ind,algo,max_risk,max_vol):
     reasons=[]
     if ind["volatility"]>max_vol: reasons.append(f"Volatility {ind['volatility']:.1f}% exceeds {max_vol:.1f}%")
     if algo["score"]<55: reasons.append("Score below execution threshold")
     if not 0<max_risk<=2: reasons.append("Risk must be between 0 and 2%")
     return {"blocked":bool(reasons),"reason":"; ".join(reasons) if reasons else "All paper-trading checks passed."}
+
 
 def ai_helper(ind,algo,risk):
     warnings=[]
@@ -121,6 +147,7 @@ def ai_helper(ind,algo,risk):
     confidence=max(0,min(100,algo["score"]-min(20,len(warnings)*8)))
     action="BLOCK" if risk["blocked"] else algo["signal"] if algo["signal"] in ("BUY","SELL") and confidence>=65 else "HOLD"
     return {"action":action,"confidence":round(confidence,1),"warnings":warnings}
+
 
 def submit_paper_order(symbol,side,qty):
     if not PAPER_ONLY: return False,"Live trading is disabled."
