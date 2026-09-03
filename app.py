@@ -130,8 +130,6 @@ def historical_prediction(df, quarter_start):
     if current is None:
         return None
 
-    # Walk through older historical points. Each training example uses 63 days of
-    # information ending before the point and then observes the following 63 days.
     dates = df.index
     examples = []
     min_i = 70
@@ -149,7 +147,6 @@ def historical_prediction(df, quarter_start):
     if len(examples) < 5:
         return None
 
-    # Nearest historical market states. No future information from the current quarter is used.
     states = np.array([x[0] for x in examples])
     scale = np.std(states, axis=0)
     scale[scale == 0] = 1.0
@@ -184,7 +181,7 @@ def select_predicted_top_10(history_by_symbol, quarter_start):
 
 
 def simulate_quarter(df, quarter_start, quarter_end, starting_capital, buy_drop_pct, profit_target_pct):
-    """Trade only the selected stock during the quarter using the USER variables."""
+    """Trade one selected stock using the supplied buy/sell variables."""
     data = df[(df.index >= pd.Timestamp(quarter_start)) & (df.index <= pd.Timestamp(quarter_end))].copy()
     if len(data) < 2:
         return starting_capital, []
@@ -209,7 +206,6 @@ def simulate_quarter(df, quarter_start, quarter_end, starting_capital, buy_drop_
                     cash -= qty * entry_price
         else:
             target = position["entry_price"] * (1 + profit_target_pct / 100)
-            # Daily high reaching the target means the target was hit intraday.
             if float(row["high"]) >= target:
                 exit_price = target
                 pnl = (exit_price - position["entry_price"]) * position["qty"]
@@ -237,30 +233,82 @@ def simulate_quarter(df, quarter_start, quarter_end, starting_capital, buy_drop_
     return cash, trades
 
 
-st.title("💰 VAST CASH")
-st.subheader("MAXPROFIT HISTORICAL PREDICTION ENGINE")
-st.write("MAXPROFIT learns from previous market patterns, predicts which stocks have the strongest historical next-quarter expectation, then tests the buy-low/sell-high rules on the following quarter. Historical simulation only. No live orders.")
+def run_strategy(histories, windows, selections_by_quarter, starting_capital, buy_drop, profit_target):
+    """Run one complete strategy combination against the already-built predictions."""
+    total_start = float(starting_capital)
+    total_end = float(starting_capital)
+    all_trades = []
+    quarter_rows = []
 
-col1, col2, col3, col4 = st.columns(4)
+    for qstart, qend in windows:
+        selected = selections_by_quarter.get(str(qstart.date()), [])
+        if not selected:
+            continue
+        quarter_start_capital = total_end
+        quarter_end_capital = quarter_start_capital
+        qtr_trades = []
+
+        for item in selected:
+            ticker = item["Ticker"]
+            ending, trades = simulate_quarter(
+                histories[ticker], qstart, qend,
+                quarter_start_capital / 10,
+                buy_drop, profit_target
+            )
+            quarter_end_capital += ending - quarter_start_capital / 10
+            for trade in trades:
+                trade["Ticker"] = ticker
+                trade["Quarter"] = f"{qstart.date()} to {qend.date()}"
+                qtr_trades.append(trade)
+
+        total_end = quarter_end_capital
+        all_trades.extend(qtr_trades)
+        quarter_rows.append({
+            "Quarter": f"{qstart.date()} to {qend.date()}",
+            "Predicted Top 10": ", ".join(x["Ticker"] for x in selected),
+            "Start Capital": round(quarter_start_capital, 2),
+            "End Capital": round(quarter_end_capital, 2),
+            "Quarter P/L": round(quarter_end_capital - quarter_start_capital, 2),
+            "Trades": len(qtr_trades),
+        })
+
+    pnl = total_end - total_start
+    ret = pnl / total_start * 100 if total_start else 0
+    target_sales = [t for t in all_trades if "target" in t["Reason"]]
+    winners = [t for t in target_sales if t["P/L"] > 0]
+    return {
+        "Buy Pullback %": buy_drop,
+        "Sell Target %": profit_target,
+        "Ending Capital": total_end,
+        "Profit / Loss": pnl,
+        "Return %": ret,
+        "Target Sales": len(target_sales),
+        "Target Win Rate %": len(winners) / len(target_sales) * 100 if target_sales else 0,
+        "All Trade Exits": len(all_trades),
+        "trades": all_trades,
+        "quarters": quarter_rows,
+    }
+
+
+st.title("💰 VAST CASH")
+st.subheader("MAXPROFIT HISTORICAL PREDICTION + OPTIMIZATION ENGINE")
+st.write("MAXPROFIT learns from previous market patterns, predicts which stocks have the strongest historical next-quarter expectation, then automatically tests buy-low/sell-high combinations to find the highest historical return. Historical simulation only. No live orders.")
+
+col1, col2 = st.columns(2)
 with col1:
     capital = st.number_input("Starting money", min_value=100.0, value=1000.0, step=100.0)
 with col2:
     test_days = st.number_input("Test length (calendar days)", min_value=180, max_value=3650, value=730, step=30)
-with col3:
-    buy_drop = st.number_input("Buy up to % below recent high", min_value=5.0, max_value=30.0, value=15.0, step=1.0)
-with col4:
-    profit_target = st.number_input("Sell at % above purchase", min_value=1.0, max_value=30.0, value=8.0, step=1.0)
 
-st.info("The stock picker is no longer simply choosing the stocks that already went up most. For every quarter it builds a point-in-time market state, searches older historical states that looked similar, and uses what happened AFTER those old states to estimate the next quarter. Then the simulation applies your current buy-pullback and sell-target variables.")
+st.info("MAXPROFIT will automatically test EVERY whole-number buy pullback from 1% through 20% below the recent high against EVERY whole-number sell target from 1% through 20% above the actual purchase price. That is 400 buy/sell combinations. The stock predictions are calculated once, then every combination is tested against the same historical quarters so the comparison is fair.")
 
-if st.button("▶️ RUN MAXPROFIT SIMULATION", type="primary", width="stretch"):
+if st.button("⚔️ RUN MAXPROFIT AUTO-OPTIMIZER", type="primary", width="stretch"):
     if not alpaca_headers():
         st.error("Alpaca paper credentials are not available. Check Streamlit Secrets.")
         st.stop()
 
     end = datetime.now(timezone.utc).date()
     requested_start = (datetime.now(timezone.utc) - timedelta(days=int(test_days))).date()
-    # Extra history is essential because the prediction model must learn from older quarters.
     data_start = (datetime.now(timezone.utc) - timedelta(days=int(test_days) + 1100)).date()
 
     histories = {}
@@ -278,74 +326,87 @@ if st.button("▶️ RUN MAXPROFIT SIMULATION", type="primary", width="stretch")
         st.stop()
 
     windows = quarter_windows(requested_start, end)
-    total_start = float(capital)
-    total_end = float(capital)
-    quarter_rows, all_trades, all_predictions = [], [], []
 
-    for qstart, qend in windows:
+    # Build the historical stock predictions ONCE. Every buy/sell combination
+    # then uses the exact same predicted Top 10 for a fair optimization.
+    status.write("Building point-in-time historical predictions...")
+    selections_by_quarter = {}
+    all_predictions = []
+    prediction_progress = st.progress(0)
+
+    for qnum, (qstart, qend) in enumerate(windows):
         selected, full_rank = select_predicted_top_10(histories, qstart)
-        if not selected:
-            continue
-        selected_names = [x["Ticker"] for x in selected]
-        quarter_start_capital = total_end
-        quarter_end_capital = quarter_start_capital
-        qtr_trades = []
+        if selected:
+            selections_by_quarter[str(qstart.date())] = selected
+            for rank, item in enumerate(selected, start=1):
+                record = dict(item)
+                record["Quarter"] = f"{qstart.date()} to {qend.date()}"
+                record["Rank"] = rank
+                all_predictions.append(record)
+        prediction_progress.progress((qnum + 1) / max(len(windows), 1))
 
-        for item in selected:
-            ticker = item["Ticker"]
-            ending, trades = simulate_quarter(histories[ticker], qstart, qend, quarter_start_capital / 10, buy_drop, profit_target)
-            quarter_end_capital += ending - quarter_start_capital / 10
-            for trade in trades:
-                trade["Ticker"] = ticker
-                trade["Quarter"] = f"{qstart.date()} to {qend.date()}"
-                qtr_trades.append(trade)
+    if not selections_by_quarter:
+        st.error("MAXPROFIT could not build enough historical predictions for the selected period.")
+        st.stop()
 
-        total_end = quarter_end_capital
-        all_trades.extend(qtr_trades)
-        for rank, item in enumerate(selected, start=1):
-            item = dict(item)
-            item["Quarter"] = f"{qstart.date()} to {qend.date()}"
-            item["Rank"] = rank
-            all_predictions.append(item)
+    # Automatic optimization: 20 x 20 = 400 combinations.
+    combinations = [(buy, sell) for buy in range(1, 21) for sell in range(1, 21)]
+    results = []
+    optimization_progress = st.progress(0)
+    status.write(f"Testing {len(combinations)} buy/sell combinations...")
 
-        quarter_rows.append({
-            "Quarter": f"{qstart.date()} to {qend.date()}",
-            "Predicted Top 10": ", ".join(selected_names),
-            "Start Capital": round(quarter_start_capital, 2),
-            "End Capital": round(quarter_end_capital, 2),
-            "Quarter P/L": round(quarter_end_capital - quarter_start_capital, 2),
-            "Trades": len(qtr_trades),
-        })
+    for n, (buy, sell) in enumerate(combinations):
+        result = run_strategy(
+            histories, windows, selections_by_quarter,
+            float(capital), buy, sell
+        )
+        results.append(result)
+        optimization_progress.progress((n + 1) / len(combinations))
 
-    pnl = total_end - total_start
-    ret = pnl / total_start * 100 if total_start else 0
-    completed = [t for t in all_trades if "target" in t["Reason"]]
-    winners = [t for t in completed if t["P/L"] > 0]
+    results.sort(key=lambda x: (x["Return %"], x["Profit / Loss"]), reverse=True)
+    best = results[0]
+
+    st.success(
+        f"MAXPROFIT found the highest historical return at BUY -{best['Buy Pullback %']:.0f}% / "
+        f"SELL +{best['Sell Target %']:.0f}%: {best['Return %']:+.2f}%"
+    )
 
     st.divider()
     a, b, c, d = st.columns(4)
-    a.metric("Starting Capital", f"${total_start:,.2f}")
-    b.metric("Ending Capital", f"${total_end:,.2f}")
-    c.metric("Profit / Loss", f"${pnl:+,.2f}")
-    d.metric("Return", f"{ret:+.2f}%")
+    a.metric("Best Buy Pullback", f"-{best['Buy Pullback %']:.0f}%")
+    b.metric("Best Sell Target", f"+{best['Sell Target %']:.0f}%")
+    c.metric("Best Ending Capital", f"${best['Ending Capital']:,.2f}")
+    d.metric("Best Historical Return", f"{best['Return %']:+.2f}%")
 
-    a, b, c = st.columns(3)
-    a.metric("Target Sales", len(completed))
-    b.metric("Target Win Rate", f"{len(winners) / len(completed) * 100:.1f}%" if completed else "0.0%")
-    c.metric("All Trade Exits", len(all_trades))
+    st.subheader("🏆 Top MAXPROFIT Combinations")
+    ranking = pd.DataFrame([
+        {
+            "Rank": i + 1,
+            "Buy Pullback %": r["Buy Pullback %"],
+            "Sell Target %": r["Sell Target %"],
+            "Ending Capital": round(r["Ending Capital"], 2),
+            "Profit / Loss": round(r["Profit / Loss"], 2),
+            "Return %": round(r["Return %"], 2),
+            "Target Sales": r["Target Sales"],
+            "Target Win Rate %": round(r["Target Win Rate %"], 1),
+            "All Trade Exits": r["All Trade Exits"],
+        }
+        for i, r in enumerate(results[:25])
+    ])
+    st.dataframe(ranking, width="stretch", hide_index=True)
 
-    if quarter_rows:
-        st.subheader("Quarter-by-Quarter Results")
-        st.dataframe(pd.DataFrame(quarter_rows), width="stretch", hide_index=True)
+    st.subheader("🔥 Best Strategy Quarter-by-Quarter")
+    if best["quarters"]:
+        st.dataframe(pd.DataFrame(best["quarters"]), width="stretch", hide_index=True)
 
+    st.subheader("What MAXPROFIT Predicted From History")
     if all_predictions:
-        st.subheader("What MAXPROFIT Predicted From History")
         st.dataframe(pd.DataFrame(all_predictions), width="stretch", hide_index=True)
 
-    if all_trades:
-        st.subheader("Trade Results")
-        st.dataframe(pd.DataFrame(all_trades).sort_values("Buy Date"), width="stretch", hide_index=True)
+    st.subheader("Best Strategy Trade Results")
+    if best["trades"]:
+        st.dataframe(pd.DataFrame(best["trades"]).sort_values("Buy Date"), width="stretch", hide_index=True)
     else:
-        st.info("No qualifying pullback trades occurred during the selected test period.")
+        st.info("The optimizer found no qualifying pullback trades in the selected test period.")
 
-    st.caption("Prediction uses only historical information available before each quarter. The future quarter is then used strictly to test whether that historical prediction and trading rule worked. This is evidence for testing, not a guarantee of future returns. Paper/simulation only.")
+    st.caption("The optimizer ranks combinations by total historical return. Predictions use only information available before each quarter. The future quarter is used strictly to test the prediction and trading rules. The winning historical combination is not a guarantee of future returns. Paper/simulation only.")
