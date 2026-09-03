@@ -49,11 +49,28 @@ def get_secret(*names):
     return None
 
 
+@st.cache_resource(show_spinner=False)
 def alpaca_credentials():
-    return (
-        get_secret("ALPACA_API_KEY", "ALPACA_API_KEY_ID", "API_KEY"),
-        get_secret("ALPACA_SECRET_KEY", "ALPACA_API_SECRET", "API_SECRET", "SECRET_KEY"),
-    )
+    """
+    Return Alpaca API key and secret from Streamlit Secrets or environment variables.
+    
+    Searches through multiple fallback names for compatibility with different
+    configuration styles. Results are cached to avoid repeated lookups.
+    
+    Returns:
+        tuple: (api_key, secret_key) or (None, None) if credentials are unavailable.
+    """
+    ALPACA_API_KEY_NAMES = ("ALPACA_API_KEY", "ALPACA_API_KEY_ID", "API_KEY")
+    ALPACA_SECRET_NAMES = ("ALPACA_SECRET_KEY", "ALPACA_API_SECRET", "API_SECRET", "SECRET_KEY")
+    
+    key = get_secret(*ALPACA_API_KEY_NAMES)
+    secret = get_secret(*ALPACA_SECRET_NAMES)
+    
+    # Validate both are present before returning
+    if not key or not secret:
+        return None, None
+    
+    return key, secret
 
 
 def alpaca_headers():
@@ -193,7 +210,7 @@ with st.sidebar:
     st.header("⚙️ Portfolio Setup")
     stock_text=st.text_area("Stock universe (1–10 tickers)","AAPL\nMSFT\nNVDA\nAMZN\nMETA\nGOOGL\nTSLA\nAMD\nAVGO\nJPM",height=220)
     max_risk=st.slider("Max risk / trade (%)",.1,2.0,1.0,.1); max_vol=st.slider("Max volatility (%)",20.0,100.0,55.0,1.0)
-    st.divider(); st.header("🧪 Backtest Settings"); period=st.selectbox("Historical test period",["6mo","1y","2y","3y","5y"],index=1); capital=st.number_input("Starting paper capital ($)",100.0,1000000.0,1000.0,100.0); allocation=st.slider("Capital allocated per trade (%)",5.0,100.0,50.0,5.0); hold_days=st.number_input("Automatic maximum hold (trading days)",1,252,6,1)
+    st.divider(); st.header("🧪 Backtest Settings"); period=st.selectbox("Historical test period",["6mo","1y","2y","3y","5y"],index=1); capital=st.number_input("Starting paper capital ($)",100.0,10000000.0,100000.0,1000.0)
 
 stocks=list(dict.fromkeys([s.strip().upper() for s in stock_text.replace(",","\n").splitlines() if s.strip()]))[:10] or ["AAPL"]
 st.header("📊 Alpaca Market Scan"); rows=[]; results={}
@@ -206,7 +223,7 @@ st.dataframe(pd.DataFrame(rows).sort_values(["Score","Confidence"],ascending=Fal
 
 if results:
     selected=st.selectbox("Select stock",list(results)); ind,algo,risk,ai=results[selected]
-    x1,x2,x3,x4=st.columns(4); x1.metric("Price",f"${ind['price']:.2f}"); x2.metric("MAXPROFIT",f"{algo['signal']} / {algo['score']:.0f}"); x3.metric("AI",f"{ai['action']} / {ai['confidence']:.0f}%"); x4.metric("Risk Gate","BLOCK" if risk["blocked"] else "PASS")
+    x1,x2,x3,x4=st.columns(4); x1.metric("Price",f"${ind['price']:.2f}"); x2.metric("MAXPROFIT",f"{algo['signal']} / {algo['score']:.0f}"); x3.metric("AI",f"{ai['action']} / {ai['confidence']:.0f}"); x4.metric("Volatility",f"{ind['volatility']:.1f}%")
     with st.expander("🤖 AI Helper",expanded=True):
         for w in ai["warnings"]: st.write("⚠️ "+w)
         st.caption(risk["reason"])
@@ -219,7 +236,7 @@ if results:
         ok,msg=submit_paper_order(selected,"sell",qty); st.success(msg) if ok else st.error(msg)
     if b3.button("🟡 HOLD",width="stretch"): st.info(f"HOLD recorded for {selected}. No order sent.")
 
-st.header("🧪 Historical Simulation"); st.caption("Walk-forward simulation. Signals use only data available at each point; entries/exits use the following trading day's open. Automatic maximum hold defaults to 6 trading days.")
+st.header("🧪 Historical Simulation"); st.caption("Walk-forward simulation. Signals use only data available at each point; entries/exits use the following trading day's open. Automatic maximum loss-exit and end-of-month take-profit.")
 if st.button("▶️ RUN SIMULATION",type="primary",width="stretch"):
     if not alpaca_headers(): st.error(account_error or "Alpaca PAPER credentials are unavailable.")
     else:
