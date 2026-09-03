@@ -12,22 +12,16 @@ ALPACA_TRADE_URL = "https://paper-api.alpaca.markets"
 ALPACA_DATA_URL = "https://data.alpaca.markets"
 
 
-def _find_secret_in_mapping(mapping, wanted_names):
-    """Find a secret by name at the root or inside any TOML section."""
+def _find_secret(mapping, names):
     if not isinstance(mapping, Mapping):
         return None
-    wanted = {str(x).strip().upper() for x in wanted_names}
+    wanted = {n.upper() for n in names}
     for key in mapping:
-        try:
-            value = mapping[key]
-        except Exception:
-            continue
-        if str(key).strip().upper() in wanted and value is not None:
-            text = str(value).strip()
-            if text:
-                return text
+        value = mapping[key]
+        if str(key).strip().upper() in wanted and value is not None and str(value).strip():
+            return str(value).strip()
         if isinstance(value, Mapping):
-            found = _find_secret_in_mapping(value, wanted_names)
+            found = _find_secret(value, names)
             if found:
                 return found
     return None
@@ -35,14 +29,14 @@ def _find_secret_in_mapping(mapping, wanted_names):
 
 def get_secret(*names):
     try:
-        found = _find_secret_in_mapping(st.secrets, names)
+        found = _find_secret(st.secrets, names)
         if found:
             return found
     except Exception:
         pass
     for name in names:
         value = os.getenv(name)
-        if value is not None and str(value).strip():
+        if value and str(value).strip():
             return str(value).strip()
     return None
 
@@ -56,179 +50,177 @@ def alpaca_credentials():
 
 def alpaca_headers():
     key, secret = alpaca_credentials()
-    if not key or not secret:
-        return None
-    return {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
-
-
-def alpaca_account():
-    headers = alpaca_headers()
-    if not headers:
-        key, secret = alpaca_credentials()
-        missing = []
-        if not key:
-            missing.append("API key")
-        if not secret:
-            missing.append("secret key")
-        return None, "Streamlit Secrets could not find your Alpaca " + " and ".join(missing) + "."
-    try:
-        r = requests.get(f"{ALPACA_TRADE_URL}/v2/account", headers=headers, timeout=15)
-        if r.status_code != 200:
-            try:
-                detail = r.json().get("message", r.text[:300])
-            except Exception:
-                detail = r.text[:300]
-            return None, f"Alpaca PAPER rejected the credentials (HTTP {r.status_code}): {detail}"
-        return r.json(), None
-    except Exception as exc:
-        return None, f"Could not reach Alpaca PAPER: {exc}"
+    return {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret} if key and secret else None
 
 
 def period_start(period):
     days = {"6mo": 190, "1y": 370, "2y": 740, "3y": 1100, "5y": 1850}
-    return (datetime.now(timezone.utc) - timedelta(days=days.get(period, 370))).date().isoformat()
+    return (datetime.now(timezone.utc) - timedelta(days=days[period])).date().isoformat()
 
 
-def load_history(symbol, period="1y"):
+def load_history(symbol, period):
     headers = alpaca_headers()
     if not headers:
-        return None, "Alpaca credentials are unavailable to the app."
-    params = {"timeframe":"1Day", "start":period_start(period), "end":datetime.now(timezone.utc).date().isoformat(), "limit":10000, "adjustment":"all", "feed":"iex", "sort":"asc"}
+        return None, "Alpaca paper credentials are unavailable."
+    params = {"timeframe": "1Day", "start": period_start(period), "end": datetime.now(timezone.utc).date().isoformat(), "limit": 10000, "adjustment": "all", "feed": "iex", "sort": "asc"}
+    bars = []
+    token = None
     try:
-        bars=[]; token=None
         for _ in range(20):
-            if token: params["page_token"] = token
-            r=requests.get(f"{ALPACA_DATA_URL}/v2/stocks/{symbol}/bars",headers=headers,params=params,timeout=20)
+            if token:
+                params["page_token"] = token
+            r = requests.get(f"{ALPACA_DATA_URL}/v2/stocks/{symbol}/bars", headers=headers, params=params, timeout=20)
             if r.status_code != 200:
-                try: detail=r.json().get("message",r.text[:300])
-                except Exception: detail=r.text[:300]
-                return None,f"Alpaca data HTTP {r.status_code}: {detail}"
-            payload=r.json(); bars.extend(payload.get("bars",[])); token=payload.get("next_page_token")
-            if not token: break
-        if not bars: return None,f"No Alpaca daily data returned for {symbol}."
-        df=pd.DataFrame(bars); needed=["t","o","c","v"]
-        if not all(x in df.columns for x in needed): return None,"Unexpected Alpaca bar format."
-        df=df[needed].copy(); df.columns=["date","open","close","volume"]
-        df["date"]=pd.to_datetime(df["date"],utc=True).dt.tz_convert("America/New_York").dt.normalize().dt.tz_localize(None)
-        df=df.set_index("date").sort_index(); df=df[["open","close","volume"]].apply(pd.to_numeric,errors="coerce").dropna()
-        if len(df)<60: return None,f"Only {len(df)} usable bars returned for {symbol}."
-        return df,None
-    except Exception as exc: return None,f"Alpaca market-data error: {exc}"
+                try:
+                    detail = r.json().get("message", r.text[:300])
+                except Exception:
+                    detail = r.text[:300]
+                return None, f"Alpaca data HTTP {r.status_code}: {detail}"
+            payload = r.json()
+            bars.extend(payload.get("bars", []))
+            token = payload.get("next_page_token")
+            if not token:
+                break
+        if not bars:
+            return None, f"No daily data returned for {symbol}."
+        df = pd.DataFrame(bars)
+        needed = ["t", "o", "c", "v"]
+        if not all(x in df.columns for x in needed):
+            return None, "Unexpected Alpaca bar format."
+        df = df[needed].copy()
+        df.columns = ["date", "open", "close", "volume"]
+        df["date"] = pd.to_datetime(df["date"], utc=True).dt.tz_convert("America/New_York").dt.normalize().dt.tz_localize(None)
+        df = df.set_index("date").sort_index()
+        return df[["open", "close", "volume"]].apply(pd.to_numeric, errors="coerce").dropna(), None
+    except Exception as exc:
+        return None, f"Alpaca market-data error: {exc}"
 
 
-def indicators(df,end=None):
-    d=df if end is None else df.iloc[:end]; c=d["close"]
-    if len(c)<51: return None
-    sma20=c.rolling(20).mean().iloc[-1]; sma50=c.rolling(50).mean().iloc[-1]
-    momentum=(c.iloc[-1]/c.iloc[-21]-1)*100; volatility=c.pct_change().rolling(20).std().iloc[-1]*math.sqrt(252)*100; av=d["volume"].rolling(20).mean().iloc[-1]
-    return {"price":float(c.iloc[-1]),"sma20":float(sma20),"sma50":float(sma50),"momentum20":float(momentum),"volatility":float(volatility),"volume_ratio":float(d["volume"].iloc[-1]/av if av else 0)}
+def score(ind):
+    s = 50
+    if ind["price"] > ind["sma20"]: s += 15
+    else: s -= 15
+    if ind["sma20"] > ind["sma50"]: s += 15
+    else: s -= 15
+    if ind["momentum"] > 3: s += 15
+    elif ind["momentum"] < -3: s -= 15
+    if ind["volume_ratio"] >= 1.1: s += 5
+    if ind["volatility"] > 55: s -= 15
+    elif ind["volatility"] < 18: s += 5
+    return max(0, min(100, s))
 
 
-def maxprofit(ind):
-    score=50; reasons=[]
-    if ind["price"]>ind["sma20"]: score+=15; reasons.append("Price above SMA20")
-    else: score-=15; reasons.append("Price below SMA20")
-    if ind["sma20"]>ind["sma50"]: score+=15; reasons.append("SMA20 above SMA50")
-    else: score-=15; reasons.append("SMA20 below SMA50")
-    if ind["momentum20"]>3: score+=15; reasons.append("Positive 20-day momentum")
-    elif ind["momentum20"]<-3: score-=15; reasons.append("Negative 20-day momentum")
-    if ind["volume_ratio"]>=1.1: score+=5; reasons.append("Volume confirmation")
-    if ind["volatility"]>55: score-=15; reasons.append("Elevated volatility")
-    elif ind["volatility"]<18: score+=5; reasons.append("Contained volatility")
-    score=max(0,min(100,score)); signal="BUY" if score>=70 else "SELL" if score<=35 else "HOLD"
-    return {"signal":signal,"score":score,"reasons":reasons}
+def indicators(d):
+    c = d["close"]
+    if len(c) < 51:
+        return None
+    sma20 = c.rolling(20).mean().iloc[-1]
+    sma50 = c.rolling(50).mean().iloc[-1]
+    momentum = (c.iloc[-1] / c.iloc[-21] - 1) * 100
+    volatility = c.pct_change().rolling(20).std().iloc[-1] * math.sqrt(252) * 100
+    avg_volume = d["volume"].rolling(20).mean().iloc[-1]
+    return {"price": float(c.iloc[-1]), "sma20": float(sma20), "sma50": float(sma50), "momentum": float(momentum), "volatility": float(volatility), "volume_ratio": float(d["volume"].iloc[-1] / avg_volume if avg_volume else 0)}
 
 
-def risk_gate(ind,algo,max_risk,max_vol):
-    reasons=[]
-    if ind["volatility"]>max_vol: reasons.append(f"Volatility {ind['volatility']:.1f}% exceeds {max_vol:.1f}%")
-    if algo["score"]<55: reasons.append("Score below execution threshold")
-    if not 0<max_risk<=2: reasons.append("Risk must be between 0 and 2%")
-    return {"blocked":bool(reasons),"reason":"; ".join(reasons) if reasons else "All paper-trading checks passed."}
+def signal(ind):
+    s = score(ind)
+    return "BUY" if s >= 70 else "SELL" if s <= 35 else "HOLD"
 
 
-def ai_helper(ind,algo,risk):
-    warnings=[]
-    if ind["price"]<=ind["sma20"]: warnings.append("Price below short-term trend")
-    if ind["sma20"]<=ind["sma50"]: warnings.append("Short-term trend below 50-day trend")
-    if ind["volatility"]>55: warnings.append("Elevated volatility")
-    if ind["volume_ratio"]<.75: warnings.append("Weak volume")
-    confidence=max(0,min(100,algo["score"]-min(20,len(warnings)*8)))
-    action="BLOCK" if risk["blocked"] else algo["signal"] if algo["signal"] in ("BUY","SELL") and confidence>=65 else "HOLD"
-    return {"action":action,"confidence":round(confidence,1),"warnings":warnings}
+def simulate_symbol(df, starting_capital, allocation_pct, hold_days):
+    cash = starting_capital
+    trades = []
+    i = 51
+    while i < len(df) - 1:
+        hist = df.iloc[:i]
+        ind = indicators(hist)
+        if not ind:
+            i += 1
+            continue
+        sig = signal(ind)
+        if sig != "BUY":
+            i += 1
+            continue
+        entry_i = i + 1
+        entry = float(df["open"].iloc[entry_i])
+        dollars = cash * allocation_pct / 100
+        qty = int(dollars // entry)
+        if qty < 1:
+            i += 1
+            continue
+        last_i = min(entry_i + hold_days, len(df) - 1)
+        exit_i = entry_i
+        for j in range(entry_i + 1, last_i + 1):
+            h = df.iloc[:j]
+            ind2 = indicators(h)
+            if ind2 and signal(ind2) == "SELL":
+                exit_i = j + 1 if j + 1 < len(df) else j
+                break
+            exit_i = j
+        exit_price = float(df["open"].iloc[exit_i])
+        pnl = (exit_price - entry) * qty
+        cash += pnl
+        trades.append({"Buy Date": df.index[entry_i].date(), "Sell Date": df.index[exit_i].date(), "Shares": qty, "Buy": round(entry, 2), "Sell": round(exit_price, 2), "Hold Days": exit_i - entry_i, "P/L": round(pnl, 2), "Return %": round((exit_price / entry - 1) * 100, 2)})
+        i = max(exit_i + 1, i + 1)
+    return cash, trades
 
 
-def submit_paper_order(symbol,side,qty):
-    if not PAPER_ONLY: return False,"Live trading is disabled."
-    headers=alpaca_headers()
-    if not headers: return False,"Alpaca PAPER credentials are unavailable."
-    try:
-        payload={"symbol":symbol,"qty":str(int(qty)),"side":side,"type":"market","time_in_force":"day"}
-        r=requests.post(f"{ALPACA_TRADE_URL}/v2/orders",headers={**headers,"Content-Type":"application/json"},json=payload,timeout=15)
-        if r.status_code not in (200,201):
-            try: detail=r.json().get("message",r.text[:300])
-            except Exception: detail=r.text[:300]
-            return False,f"Paper order rejected HTTP {r.status_code}: {detail}"
-        o=r.json(); return True,f"PAPER {side.upper()} submitted: {o.get('symbol')} {o.get('qty')} shares."
-    except Exception as exc: return False,f"Paper order error: {exc}"
+st.title("💰 VAST CASH")
+st.subheader("MAXPROFIT SIMULATOR")
+st.write("Test the strategy against real historical market data. No live trades are sent by the simulator.")
 
-st.title("💰 VAST CASH"); st.subheader("MAXPROFIT Engine • AI Helper • Alpaca Paper Trading")
-account,account_error=alpaca_account()
-if account:
-    st.success("🟢 ALPACA PAPER CONNECTED")
-else:
-    st.error("🔴 ALPACA PAPER CONNECTION FAILED")
-    st.code(account_error or "Unknown connection error")
-    key, secret = alpaca_credentials()
-    st.caption(f"Credential detection: API key {'FOUND' if key else 'NOT FOUND'} • Secret key {'FOUND' if secret else 'NOT FOUND'} • values hidden")
-    st.caption("Paper endpoint: paper-api.alpaca.markets/v2. Keys are read from Streamlit Secrets and are never displayed.")
+col1, col2, col3 = st.columns(3)
+with col1:
+    capital = st.number_input("Starting money", min_value=100.0, value=1000.0, step=100.0)
+with col2:
+    period = st.selectbox("Test period", ["6mo", "1y", "2y", "3y", "5y"], index=1)
+with col3:
+    hold_days = st.number_input("Maximum hold (trading days)", min_value=1, max_value=252, value=6, step=1)
 
-c1,c2,c3,c4=st.columns(4); c1.metric("System","ONLINE"); c2.metric("Broker","ALPACA • PAPER" if account else "ALPACA • ERROR"); c3.metric("Mode","PAPER ONLY"); c4.metric("Live Orders","DISABLED")
-if account:
-    a,b=st.columns(2); a.metric("Paper Cash",f"${float(account.get('cash',0)):,.2f}"); b.metric("Buying Power",f"${float(account.get('buying_power',0)):,.2f}")
+stock_text = st.text_area("Stocks to test (up to 10, one per line)", "AAPL\nMSFT\nNVDA\nAMZN\nMETA\nGOOGL\nTSLA\nAMD\nAVGO\nJPM", height=150)
+stocks = list(dict.fromkeys(s.strip().upper() for s in stock_text.replace(",", "\n").splitlines() if s.strip()))[:10]
+allocation = 50.0
 
-with st.sidebar:
-    st.header("⚙️ Portfolio Setup")
-    stock_text=st.text_area("Stock universe (1–10 tickers)","AAPL\nMSFT\nNVDA\nAMZN\nMETA\nGOOGL\nTSLA\nAMD\nAVGO\nJPM",height=220)
-    max_risk=st.slider("Max risk / trade (%)",.1,2.0,1.0,.1); max_vol=st.slider("Max volatility (%)",20.0,100.0,55.0,1.0)
-    st.divider(); st.header("🧪 Backtest Settings"); period=st.selectbox("Historical test period",["6mo","1y","2y","3y","5y"],index=1); capital=st.number_input("Starting paper capital ($)",100.0,1000000.0,1000.0,100.0); allocation=st.slider("Capital allocated per trade (%)",5.0,100.0,50.0,5.0); hold_days=st.number_input("Automatic maximum hold (trading days)",1,252,6,1)
-
-stocks=list(dict.fromkeys([s.strip().upper() for s in stock_text.replace(",","\n").splitlines() if s.strip()]))[:10] or ["AAPL"]
-st.header("📊 Alpaca Market Scan"); rows=[]; results={}
-for ticker in stocks:
-    hist,err=load_history(ticker,"6mo")
-    if hist is None: rows.append({"Ticker":ticker,"MAXPROFIT":"DATA ERROR","Score":0,"AI":"BLOCK","Confidence":0,"Risk":"BLOCK"}); continue
-    ind=indicators(hist); algo=maxprofit(ind); risk=risk_gate(ind,algo,max_risk,max_vol); ai=ai_helper(ind,algo,risk); results[ticker]=(ind,algo,risk,ai)
-    rows.append({"Ticker":ticker,"MAXPROFIT":algo["signal"],"Score":round(algo["score"],1),"AI":ai["action"],"Confidence":round(ai["confidence"],1),"Risk":"BLOCK" if risk["blocked"] else "PASS"})
-st.dataframe(pd.DataFrame(rows).sort_values(["Score","Confidence"],ascending=False),width="stretch",hide_index=True)
-
-if results:
-    selected=st.selectbox("Select stock",list(results)); ind,algo,risk,ai=results[selected]
-    x1,x2,x3,x4=st.columns(4); x1.metric("Price",f"${ind['price']:.2f}"); x2.metric("MAXPROFIT",f"{algo['signal']} / {algo['score']:.0f}"); x3.metric("AI",f"{ai['action']} / {ai['confidence']:.0f}%"); x4.metric("Risk Gate","BLOCK" if risk["blocked"] else "PASS")
-    with st.expander("🤖 AI Helper",expanded=True):
-        for w in ai["warnings"]: st.write("⚠️ "+w)
-        st.caption(risk["reason"])
-    st.subheader("🧾 Alpaca Paper Order Controls"); st.caption("These buttons can only send PAPER orders. Live trading is hard-disabled.")
-    qty=st.number_input("Whole shares",1,100000,1,1); confirm=st.checkbox("I understand this sends a PAPER order to Alpaca")
-    b1,b2,b3=st.columns(3)
-    if b1.button("🟢 PAPER BUY",width="stretch",disabled=not confirm):
-        ok,msg=submit_paper_order(selected,"buy",qty); st.success(msg) if ok else st.error(msg)
-    if b2.button("🔴 PAPER SELL",width="stretch",disabled=not confirm):
-        ok,msg=submit_paper_order(selected,"sell",qty); st.success(msg) if ok else st.error(msg)
-    if b3.button("🟡 HOLD",width="stretch"): st.info(f"HOLD recorded for {selected}. No order sent.")
-
-st.header("🧪 Historical Simulation"); st.caption("Walk-forward simulation. Signals use only data available at each point; entries/exits use the following trading day's open. Automatic maximum hold defaults to 6 trading days.")
-if st.button("▶️ RUN SIMULATION",type="primary",width="stretch"):
-    if not alpaca_headers(): st.error(account_error or "Alpaca PAPER credentials are unavailable.")
+if st.button("▶️ RUN SIMULATION", type="primary", width="stretch"):
+    if not alpaca_headers():
+        st.error("Alpaca paper credentials are not available. Check Streamlit Secrets.")
+        st.stop()
+    all_trades = []
+    ending_total = 0.0
+    progress = st.progress(0)
+    for n, ticker in enumerate(stocks):
+        hist, err = load_history(ticker, period)
+        if hist is None or len(hist) < 60:
+            st.warning(f"{ticker}: {err or 'Not enough history'}")
+            progress.progress((n + 1) / len(stocks))
+            continue
+        ending, trades = simulate_symbol(hist, capital, allocation, int(hold_days))
+        ending_total += ending
+        for t in trades:
+            t["Ticker"] = ticker
+            all_trades.append(t)
+        progress.progress((n + 1) / len(stocks))
+    if stocks:
+        ending_capital = ending_total / len(stocks) if ending_total else capital
     else:
-        histories={}; errors=[]
-        with st.spinner(f"Loading {period} Alpaca history..."):
-            for ticker in stocks:
-                hist,err=load_history(ticker,period)
-                if hist is not None: histories[ticker]=hist
-                else: errors.append(f"{ticker}: {err}")
-        for e in errors: st.warning(e)
-        if histories:
-            st.success(f"Loaded Alpaca historical data for {len(histories)} ticker(s).")
-            st.info("Simulation engine is active. Use the market scan and paper controls above for the current paper-trading verification phase.")
-        else: st.error("No usable Alpaca historical data was available.")
+        ending_capital = capital
+    pnl = ending_capital - capital
+    ret = pnl / capital * 100 if capital else 0
+    winners = [t for t in all_trades if t["P/L"] > 0]
+    losers = [t for t in all_trades if t["P/L"] < 0]
+    st.divider()
+    a, b, c, d = st.columns(4)
+    a.metric("Starting Capital", f"${capital:,.2f}")
+    b.metric("Ending Capital", f"${ending_capital:,.2f}")
+    c.metric("Profit / Loss", f"${pnl:+,.2f}")
+    d.metric("Return", f"{ret:+.2f}%")
+    a, b, c = st.columns(3)
+    a.metric("Trades", len(all_trades))
+    b.metric("Win Rate", f"{len(winners) / len(all_trades) * 100:.1f}%" if all_trades else "0.0%")
+    c.metric("Best Trade", f"${max((t['P/L'] for t in all_trades), default=0):+.2f}")
+    if all_trades:
+        st.subheader("Trade Results")
+        st.dataframe(pd.DataFrame(all_trades).sort_values("Buy Date"), width="stretch", hide_index=True)
+    else:
+        st.info("No BUY signals occurred during the selected test period.")
+    st.caption("This is a historical simulation, not a guarantee of future performance. It uses the MAXPROFIT signal rules and next-day-open entries with an automatic maximum hold.")
