@@ -1,39 +1,100 @@
 import math
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
-import yfinance as yf
 
 st.set_page_config(page_title="VAST CASH", page_icon="💰", layout="wide")
 PAPER_ONLY = True
+ALPACA_TRADE_URL = "https://paper-api.alpaca.markets"
+ALPACA_DATA_URL = "https://data.alpaca.markets"
 
 
-def make_demo_market(seed=42, periods=500):
-    rng = np.random.default_rng(seed)
-    returns = rng.normal(0.0005, 0.018, periods)
-    price = 100 * np.exp(np.cumsum(returns))
-    volume = rng.integers(800_000, 3_000_000, periods)
-    idx = pd.date_range(end=pd.Timestamp.now().normalize(), periods=periods, freq="B")
-    return pd.DataFrame({"open": price, "close": price, "volume": volume}, index=idx)
+def get_secret(name):
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+    return os.getenv(name)
+
+
+def alpaca_credentials():
+    return get_secret("ALPACA_API_KEY"), get_secret("ALPACA_SECRET_KEY")
+
+
+def alpaca_headers():
+    key, secret = alpaca_credentials()
+    if not key or not secret:
+        return None
+    return {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
+
+
+def alpaca_account():
+    headers = alpaca_headers()
+    if not headers:
+        return None, "Alpaca paper credentials are not configured in Streamlit Secrets."
+    try:
+        r = requests.get(f"{ALPACA_TRADE_URL}/v2/account", headers=headers, timeout=15)
+        if r.status_code != 200:
+            return None, f"Alpaca account error {r.status_code}: {r.text[:300]}"
+        return r.json(), None
+    except Exception as exc:
+        return None, f"Alpaca connection error: {exc}"
+
+
+def period_start(period):
+    days = {"6mo": 190, "1y": 370, "2y": 740, "3y": 1100, "5y": 1850}
+    return (datetime.now(timezone.utc) - timedelta(days=days.get(period, 370))).date().isoformat()
 
 
 def load_history(symbol, period="1y"):
+    headers = alpaca_headers()
+    if not headers:
+        return None, "Alpaca paper credentials are not configured."
     try:
-        df = yf.download(symbol, period=period, interval="1d", auto_adjust=True, progress=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        needed = ["Open", "Close", "Volume"]
-        if df.empty or not all(c in df.columns for c in needed):
-            return None, "No usable historical data returned."
-        df = df[needed].copy().dropna()
-        df.columns = ["open", "close", "volume"]
+        params = {
+            "timeframe": "1Day",
+            "start": period_start(period),
+            "end": datetime.now(timezone.utc).date().isoformat(),
+            "limit": 10000,
+            "adjustment": "all",
+            "feed": "iex",
+            "sort": "asc",
+        }
+        url = f"{ALPACA_DATA_URL}/v2/stocks/{symbol}/bars"
+        bars = []
+        page_token = None
+        for _ in range(20):
+            if page_token:
+                params["page_token"] = page_token
+            r = requests.get(url, headers=headers, params=params, timeout=20)
+            if r.status_code != 200:
+                return None, f"Alpaca market-data error {r.status_code}: {r.text[:300]}"
+            payload = r.json()
+            bars.extend(payload.get("bars", []))
+            page_token = payload.get("next_page_token")
+            if not page_token:
+                break
+        if not bars:
+            return None, f"No Alpaca historical data returned for {symbol}."
+        df = pd.DataFrame(bars)
+        required = ["t", "o", "c", "v"]
+        if not all(c in df.columns for c in required):
+            return None, "Alpaca returned an unexpected bar format."
+        df = df[required].copy()
+        df.columns = ["date", "open", "close", "volume"]
+        df["date"] = pd.to_datetime(df["date"], utc=True).dt.tz_convert("America/New_York").dt.normalize().dt.tz_localize(None)
+        df = df.set_index("date").sort_index()
+        df = df[["open", "close", "volume"]].apply(pd.to_numeric, errors="coerce").dropna()
         if len(df) < 60:
-            return None, "Not enough historical bars for the 50-day trend."
+            return None, f"Only {len(df)} usable daily bars returned for {symbol}."
         return df, None
     except Exception as exc:
-        return None, f"Historical data error: {exc}"
+        return None, f"Alpaca historical-data error: {exc}"
 
 
 def calculate_indicators(df, end=None):
@@ -47,11 +108,8 @@ def calculate_indicators(df, end=None):
     volatility = close.pct_change().rolling(20).std().iloc[-1] * math.sqrt(252) * 100
     avg_volume = data["volume"].rolling(20).mean().iloc[-1]
     volume_ratio = data["volume"].iloc[-1] / avg_volume if avg_volume else 0
-    return {
-        "price": float(close.iloc[-1]), "sma20": float(sma20), "sma50": float(sma50),
-        "momentum20": float(momentum20), "volatility": float(volatility),
-        "volume_ratio": float(volume_ratio)
-    }
+    return {"price": float(close.iloc[-1]), "sma20": float(sma20), "sma50": float(sma50),
+            "momentum20": float(momentum20), "volatility": float(volatility), "volume_ratio": float(volume_ratio)}
 
 
 def maxprofit_signal(ind):
@@ -96,8 +154,7 @@ def risk_gate(ind, algo, max_risk_pct, max_volatility):
 
 
 def ai_helper(ind, algo, risk):
-    warnings = []
-    confirmations = []
+    warnings, confirmations = [], []
     if ind["price"] > ind["sma20"]: confirmations.append("Price is aligned with the short-term trend.")
     else: warnings.append("Price is below the short-term trend.")
     if ind["sma20"] > ind["sma50"]: confirmations.append("20-day trend is above the 50-day trend.")
@@ -108,326 +165,143 @@ def ai_helper(ind, algo, risk):
     if risk["blocked"]: action = "BLOCK"
     elif algo["signal"] in ("BUY", "SELL") and confidence >= 65: action = algo["signal"]
     else: action = "HOLD"
-    return {"action": action, "confidence": round(confidence, 1), "warnings": warnings,
-            "confirmations": confirmations}
-
-
-def evaluate_symbol(symbol, seed):
-    ind = calculate_indicators(make_demo_market(seed + sum(map(ord, symbol))))
-    algo = maxprofit_signal(ind)
-    risk = risk_gate(ind, algo, max_risk_pct, max_volatility)
-    ai = ai_helper(ind, algo, risk)
-    return ind, algo, risk, ai
-
-
-def decision_record(symbol, selected_action, ind, algo, ai, risk):
-    return {"timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            "symbol": symbol, "price": round(ind["price"], 2),
-            "algorithm": algo["signal"], "algo_score": round(algo["score"], 1),
-            "AI_recommendation": ai["action"], "AI_confidence": ai["confidence"],
-            "user_action": selected_action, "risk_gate": "BLOCKED" if risk["blocked"] else "PASS",
-            "paper_only": True}
+    return {"action": action, "confidence": round(confidence, 1), "warnings": warnings, "confirmations": confirmations}
 
 
 def simulate_strategy(histories, starting_capital, allocation_pct, max_hold_days, max_risk_pct, max_volatility):
-    """Historical walk-forward simulator. Signals use only data available up to that day.
-    Orders execute at the following trading day's open, preventing look-ahead bias.
-    One position at a time keeps the first validation version easy to audit.
-    """
     dates = sorted(set().union(*[set(df.index) for df in histories.values()]))
-    cash = float(starting_capital)
-    position = None
-    trades = []
-    equity_curve = []
-    blocked_count = 0
-
+    cash, position, trades, equity_curve, blocked_count = float(starting_capital), None, [], [], 0
     for i, date in enumerate(dates):
         todays = {}
         for symbol, df in histories.items():
-            if date not in df.index:
-                continue
-            end = df.index.get_loc(date) + 1
-            ind = calculate_indicators(df, end)
-            if ind is None:
-                continue
-            algo = maxprofit_signal(ind)
-            risk = risk_gate(ind, algo, max_risk_pct, max_volatility)
-            ai = ai_helper(ind, algo, risk)
+            if date not in df.index: continue
+            ind = calculate_indicators(df, df.index.get_loc(date) + 1)
+            if ind is None: continue
+            algo = maxprofit_signal(ind); risk = risk_gate(ind, algo, max_risk_pct, max_volatility); ai = ai_helper(ind, algo, risk)
             todays[symbol] = (df.loc[date], ind, algo, risk, ai)
-            if risk["blocked"]:
-                blocked_count += 1
-
-        # Exit is evaluated before a new entry. A SELL signal exits at next day's open.
+            blocked_count += int(risk["blocked"])
         if position and position["symbol"] in todays:
-            _, ind, _, risk, ai = todays[position["symbol"]]
+            _, _, _, _, ai = todays[position["symbol"]]
             held = i - position["entry_index"]
-            timed_exit = held >= max_hold_days
-            signal_exit = ai["action"] == "SELL"
-            if timed_exit or signal_exit:
-                exit_date_idx = i + 1
-                if exit_date_idx < len(dates):
-                    next_date = dates[exit_date_idx]
-                    df = histories[position["symbol"]]
+            if held >= max_hold_days or ai["action"] == "SELL":
+                if i + 1 < len(dates):
+                    next_date = dates[i + 1]; df = histories[position["symbol"]]
                     if next_date in df.index:
-                        exit_price = float(df.loc[next_date, "open"])
-                        proceeds = position["shares"] * exit_price
-                        pnl = proceeds - position["cost"]
-                        cash += proceeds
-                        trades.append({
-                            "Entry": position["entry_date"], "Exit": next_date,
-                            "Ticker": position["symbol"], "Buy": round(position["entry_price"], 2),
-                            "Sell": round(exit_price, 2), "Days": held,
-                            "P&L": round(pnl, 2), "Return %": round(pnl / position["cost"] * 100, 2),
-                            "Exit Reason": "MAX HOLD" if timed_exit else "AI SELL"
-                        })
+                        exit_price = float(df.loc[next_date, "open"]); proceeds = position["shares"] * exit_price; pnl = proceeds - position["cost"]; cash += proceeds
+                        trades.append({"Entry": position["entry_date"], "Exit": next_date, "Ticker": position["symbol"], "Buy": round(position["entry_price"],2), "Sell": round(exit_price,2), "Days": held, "P&L": round(pnl,2), "Return %": round(pnl/position["cost"]*100,2), "Exit Reason": "MAX HOLD" if held >= max_hold_days else "AI SELL"})
                         position = None
-
-        # If flat, choose the highest-ranked eligible BUY signal and enter next day.
         if position is None and i + 1 < len(dates):
-            candidates = []
-            for symbol, (_, ind, algo, risk, ai) in todays.items():
-                if not risk["blocked"] and ai["action"] == "BUY":
-                    candidates.append((algo["score"], ai["confidence"], symbol))
+            candidates = [(algo["score"], ai["confidence"], symbol) for symbol, (_, _, algo, risk, ai) in todays.items() if not risk["blocked"] and ai["action"] == "BUY"]
             if candidates:
-                _, _, symbol = max(candidates)
-                next_date = dates[i + 1]
-                df = histories[symbol]
+                _, _, symbol = max(candidates); next_date = dates[i+1]; df = histories[symbol]
                 if next_date in df.index:
-                    entry_price = float(df.loc[next_date, "open"])
-                    allocation = min(cash, cash * allocation_pct / 100)
-                    shares = int(allocation / entry_price)
+                    entry_price = float(df.loc[next_date, "open"]); allocation = min(cash, cash * allocation_pct / 100); shares = int(allocation / entry_price)
                     if shares > 0:
-                        cost = shares * entry_price
-                        cash -= cost
-                        position = {
-                            "symbol": symbol, "entry_date": next_date,
-                            "entry_price": entry_price, "shares": shares,
-                            "cost": cost, "entry_index": i + 1
-                        }
-
-        # Mark-to-market equity at today's close.
+                        cost = shares * entry_price; cash -= cost; position = {"symbol": symbol, "entry_date": next_date, "entry_price": entry_price, "shares": shares, "cost": cost, "entry_index": i+1}
         equity = cash
-        if position and position["symbol"] in histories and date in histories[position["symbol"]].index:
-            equity += position["shares"] * float(histories[position["symbol"]].loc[date, "close"])
+        if position and date in histories[position["symbol"]].index: equity += position["shares"] * float(histories[position["symbol"]].loc[date, "close"])
         equity_curve.append({"Date": date, "Equity": equity})
-
-    # Close any remaining position at the final available close.
     if position:
-        df = histories[position["symbol"]]
-        last_date = df.index[-1]
-        exit_price = float(df.loc[last_date, "close"])
-        proceeds = position["shares"] * exit_price
-        pnl = proceeds - position["cost"]
-        cash += proceeds
-        held = max(0, len(dates) - 1 - position["entry_index"])
-        trades.append({
-            "Entry": position["entry_date"], "Exit": last_date,
-            "Ticker": position["symbol"], "Buy": round(position["entry_price"], 2),
-            "Sell": round(exit_price, 2), "Days": held,
-            "P&L": round(pnl, 2), "Return %": round(pnl / position["cost"] * 100, 2),
-            "Exit Reason": "END OF TEST"
-        })
-        position = None
-
+        df = histories[position["symbol"]]; last_date = df.index[-1]; exit_price = float(df.loc[last_date, "close"]); proceeds = position["shares"]*exit_price; pnl = proceeds-position["cost"]; cash += proceeds
+        trades.append({"Entry": position["entry_date"], "Exit": last_date, "Ticker": position["symbol"], "Buy": round(position["entry_price"],2), "Sell": round(exit_price,2), "Days": max(0,len(dates)-1-position["entry_index"]), "P&L": round(pnl,2), "Return %": round(pnl/position["cost"]*100,2), "Exit Reason": "END OF TEST"})
     curve = pd.DataFrame(equity_curve)
-    if curve.empty:
-        return None
-    curve["Peak"] = curve["Equity"].cummax()
-    curve["Drawdown %"] = (curve["Equity"] / curve["Peak"] - 1) * 100
-    trade_df = pd.DataFrame(trades)
-    ending = float(cash)
-    net = ending - starting_capital
-    win_rate = float((trade_df["P&L"] > 0).mean() * 100) if not trade_df.empty else 0.0
-    max_dd = float(curve["Drawdown %"].min())
-    return {
-        "starting": starting_capital, "ending": ending, "net": net,
-        "return_pct": net / starting_capital * 100, "trades": trade_df,
-        "curve": curve, "win_rate": win_rate, "max_dd": max_dd,
-        "blocked": blocked_count
-    }
+    if curve.empty: return None
+    curve["Peak"] = curve["Equity"].cummax(); curve["Drawdown %"] = (curve["Equity"]/curve["Peak"]-1)*100
+    trade_df = pd.DataFrame(trades); ending = float(cash); net = ending-starting_capital
+    return {"starting": starting_capital, "ending": ending, "net": net, "return_pct": net/starting_capital*100, "trades": trade_df, "curve": curve, "win_rate": float((trade_df["P&L"]>0).mean()*100) if not trade_df.empty else 0.0, "max_dd": float(curve["Drawdown %"].min()), "blocked": blocked_count}
+
+
+def submit_paper_order(symbol, side, qty):
+    if not PAPER_ONLY: return False, "Live trading is disabled by configuration."
+    headers = alpaca_headers()
+    if not headers: return False, "Alpaca paper credentials are not configured in Streamlit Secrets."
+    try:
+        payload = {"symbol": symbol, "qty": str(int(qty)), "side": side.lower(), "type": "market", "time_in_force": "day"}
+        r = requests.post(f"{ALPACA_TRADE_URL}/v2/orders", headers={**headers, "Content-Type":"application/json"}, json=payload, timeout=15)
+        if r.status_code not in (200, 201): return False, f"Paper order rejected {r.status_code}: {r.text[:300]}"
+        order = r.json(); return True, f"PAPER {side.upper()} submitted: {order.get('symbol')} {order.get('qty')} shares. Order ID {order.get('id')}"
+    except Exception as exc: return False, f"Paper order error: {exc}"
 
 
 st.title("💰 VAST CASH")
-st.subheader("MAXPROFIT Engine • AI Helper • Paper Trading")
-st.warning("🛡️ PAPER MONEY ONLY. BUY / SELL / HOLD below records simulated decisions only. No live orders are possible.")
+st.subheader("MAXPROFIT Engine • AI Helper • Alpaca Paper Trading")
+account, account_error = alpaca_account()
+if account:
+    st.success("🟢 ALPACA PAPER CONNECTED. No live trading endpoint is used by this app.")
+else:
+    st.warning("🟡 ALPACA PAPER NOT CONNECTED. Add the existing paper credentials to Streamlit Secrets, then reload.")
 
-c1, c2, c3, c4 = st.columns(4)
+c1,c2,c3,c4 = st.columns(4)
 c1.metric("System", "ONLINE")
-c2.metric("Broker", "IBKR • PENDING")
-c3.metric("Mode", "PAPER")
+c2.metric("Broker", "ALPACA • PAPER" if account else "ALPACA • PENDING")
+c3.metric("Mode", "PAPER ONLY")
 c4.metric("Live Orders", "DISABLED")
+if account:
+    a,b = st.columns(2); a.metric("Paper Cash", f"${float(account.get('cash',0)):,.2f}"); b.metric("Buying Power", f"${float(account.get('buying_power',0)):,.2f}")
 
 with st.sidebar:
     st.header("⚙️ Portfolio Setup")
     stock_text = st.text_area("Stock universe (1–10 tickers)", "AAPL\nMSFT\nNVDA\nAMZN\nMETA\nGOOGL\nTSLA\nAMD\nAVGO\nJPM", height=220)
-    seed = st.number_input("Paper-test seed", 1, 100000, 42)
     max_risk_pct = st.slider("Max risk / trade (%)", .1, 2.0, 1.0, .1)
     max_volatility = st.slider("Max volatility (%)", 20.0, 100.0, 55.0, 1.0)
-    st.divider()
-    st.header("🧪 Backtest Settings")
+    st.divider(); st.header("🧪 Backtest Settings")
     sim_period = st.selectbox("Historical test period", ["6mo", "1y", "2y", "3y", "5y"], index=1)
     starting_capital = st.number_input("Starting paper capital ($)", 100.0, 1_000_000.0, 1000.0, 100.0)
     allocation_pct = st.slider("Capital allocated per trade (%)", 5.0, 100.0, 50.0, 5.0)
     max_hold_days = st.number_input("Automatic maximum hold (trading days)", 1, 252, 6, 1)
 
-stocks = [s.strip().upper() for s in stock_text.replace(",", "\n").splitlines() if s.strip()]
-stocks = list(dict.fromkeys(stocks))[:10]
-if not stocks:
-    stocks = ["DEMO"]
+stocks = list(dict.fromkeys([s.strip().upper() for s in stock_text.replace(",","\n").splitlines() if s.strip()]))[:10]
+if not stocks: stocks=["AAPL"]
 
-# Live-data scan for the dashboard. Falls back to the safe deterministic demo model if unavailable.
-rows = []
-all_results = {}
-for i, ticker in enumerate(stocks):
-    hist, _ = load_history(ticker, "6mo")
-    if hist is not None:
-        ind = calculate_indicators(hist)
+st.header("📊 Live Alpaca Market Scan")
+rows=[]; all_results={}
+for ticker in stocks:
+    hist, err = load_history(ticker, "6mo")
+    if hist is None:
+        rows.append({"Ticker":ticker,"MAXPROFIT":"DATA ERROR","Score":0,"AI":"BLOCK","Confidence":0,"Risk":"BLOCK"}); continue
+    ind=calculate_indicators(hist); algo=maxprofit_signal(ind); risk=risk_gate(ind,algo,max_risk_pct,max_volatility); ai=ai_helper(ind,algo,risk); all_results[ticker]=(ind,algo,risk,ai)
+    rows.append({"Ticker":ticker,"MAXPROFIT":algo["signal"],"Score":round(algo["score"],1),"AI":ai["action"],"Confidence":round(ai["confidence"],1),"Risk":"BLOCK" if risk["blocked"] else "PASS"})
+ranking=pd.DataFrame(rows).sort_values(["Score","Confidence"],ascending=False).reset_index(drop=True); ranking.insert(0,"Rank",range(1,len(ranking)+1)); st.dataframe(ranking,use_container_width=True,hide_index=True)
+
+if all_results:
+    selected=st.selectbox("Select stock for AI Helper / paper controls", list(all_results.keys()))
+    ind,algo,risk,ai=all_results[selected]
+    x1,x2,x3,x4=st.columns(4); x1.metric("Price",f"${ind['price']:.2f}"); x2.metric("MAXPROFIT",f"{algo['signal']} / {algo['score']:.0f}"); x3.metric("AI",f"{ai['action']} / {ai['confidence']:.0f}%"); x4.metric("Risk Gate","BLOCK" if risk["blocked"] else "PASS")
+    with st.expander("🤖 AI Helper",expanded=True):
+        for text in ai["confirmations"]: st.write("✅ "+text)
+        for text in ai["warnings"]: st.write("⚠️ "+text)
+        st.caption(risk["reason"])
+
+    st.subheader("🧾 Alpaca Paper Order Controls")
+    st.caption("These buttons submit orders to the Alpaca PAPER account only. Live trading is hard-disabled.")
+    qty=st.number_input("Whole shares",1,100000,1,1)
+    confirm=st.checkbox("I understand this sends a PAPER order to Alpaca")
+    b1,b2,b3=st.columns(3)
+    if b1.button("🟢 PAPER BUY",use_container_width=True,disabled=not confirm):
+        ok,msg=submit_paper_order(selected,"buy",qty); st.success(msg) if ok else st.error(msg)
+    if b2.button("🔴 PAPER SELL",use_container_width=True,disabled=not confirm):
+        ok,msg=submit_paper_order(selected,"sell",qty); st.success(msg) if ok else st.error(msg)
+    if b3.button("🟡 HOLD",use_container_width=True): st.info(f"HOLD recorded for {selected}. No order sent.")
+
+st.header("🧪 Historical Simulation")
+st.caption("Walk-forward test using Alpaca historical daily bars. Signals use only information available before each simulated entry. Entries/exits execute at the following trading day's open. Default automatic maximum hold is 6 trading days.")
+if st.button("▶️ RUN SIMULATION",type="primary",use_container_width=True):
+    if not alpaca_headers(): st.error("Connect Alpaca PAPER credentials in Streamlit Secrets first.")
     else:
-        ind = calculate_indicators(make_demo_market(int(seed) + i + sum(map(ord, ticker))))
-    algo = maxprofit_signal(ind)
-    risk = risk_gate(ind, algo, max_risk_pct, max_volatility)
-    ai = ai_helper(ind, algo, risk)
-    all_results[ticker] = (ind, algo, risk, ai)
-    rows.append({"Rank": 0, "Ticker": ticker, "MAXPROFIT": algo["signal"],
-                 "Score": round(algo["score"], 1), "AI": ai["action"],
-                 "Confidence": round(ai["confidence"], 1),
-                 "Risk": "BLOCK" if risk["blocked"] else "PASS"})
-ranking = pd.DataFrame(rows).sort_values(["Score", "Confidence"], ascending=False).reset_index(drop=True)
-ranking["Rank"] = range(1, len(ranking) + 1)
-
-st.header("🎯 AI STOCK SELECTOR")
-st.caption("VAST CASH evaluates your 1–10 stock universe and ranks the candidates for paper trading.")
-st.dataframe(ranking, use_container_width=True, hide_index=True)
-
-suggested = ranking.iloc[0]["Ticker"]
-if ranking.iloc[0]["Risk"] == "BLOCK":
-    st.error(f"AI Helper: top candidate {suggested} is blocked by the Risk Gate.")
-else:
-    st.success(f"🤖 AI Helper's current top candidate: **{suggested}** • {ranking.iloc[0]['AI']} • {ranking.iloc[0]['Confidence']:.0f}% confidence")
-
-selected = st.selectbox("👆 Select the stock to review / paper trade", ranking["Ticker"].tolist(), index=0)
-ind, algo, risk, ai = all_results[selected]
-
-st.divider()
-st.header(f"🤖 AI HELPER • {selected}")
-a, b, c, d = st.columns(4)
-a.metric("MAXPROFIT", algo["signal"])
-b.metric("Score", f"{algo['score']:.0f}/100")
-c.metric("AI Confidence", f"{ai['confidence']:.0f}/100")
-d.metric("AI Recommendation", ai["action"])
-
-left, right = st.columns(2)
-with left:
-    st.write("**Why the helper likes/dislikes it**")
-    for x in ai["confirmations"] or ["No positive confirmations."]: st.write(f"✓ {x}")
-    for x in ai["warnings"] or ["No material warnings."]: st.write(f"⚠️ {x}")
-with right:
-    if risk["blocked"]: st.error(f"🛡️ RISK GATE: BLOCKED\n\n{risk['reason']}")
-    else: st.success(f"🛡️ RISK GATE: PASS\n\n{risk['reason']}")
-
-st.divider()
-st.header("🎮 PAPER TRADE CONTROLS")
-st.write(f"**Selected stock:** `{selected}`  |  **Paper price:** `${ind['price']:.2f}`")
-
-b1, b2, b3 = st.columns(3)
-with b1:
-    buy = st.button("🟢 BUY", use_container_width=True, disabled=risk["blocked"])
-with b2:
-    sell = st.button("🔴 SELL", use_container_width=True, disabled=risk["blocked"])
-with b3:
-    hold = st.button("🟡 HOLD", use_container_width=True)
-
-if "decision_log" not in st.session_state: st.session_state.decision_log = []
-if buy:
-    st.session_state.decision_log.insert(0, decision_record(selected, "BUY", ind, algo, ai, risk))
-    st.success(f"PAPER BUY recorded for {selected}. No real order was sent.")
-elif sell:
-    st.session_state.decision_log.insert(0, decision_record(selected, "SELL", ind, algo, ai, risk))
-    st.success(f"PAPER SELL recorded for {selected}. No real order was sent.")
-elif hold:
-    st.session_state.decision_log.insert(0, decision_record(selected, "HOLD", ind, algo, ai, risk))
-    st.info(f"PAPER HOLD recorded for {selected}.")
-
-st.divider()
-st.header("🚀 RUN SIMULATION")
-st.write("This is the fast answer to 'would this strategy have made money?' It walks forward through historical daily data, automatically buys eligible signals, holds the position, and sells on an AI SELL signal or the maximum hold period.")
-st.info(f"Simulation is PAPER ONLY. Current settings: **${starting_capital:,.0f} start • {allocation_pct:.0f}% allocation/trade • {max_hold_days} trading-day max hold • {sim_period} history**.")
-
-if st.button("▶️ RUN SIMULATION", type="primary", use_container_width=True):
-    with st.spinner("Downloading historical data and running the walk-forward simulation..."):
-        histories = {}
-        errors = []
-        for ticker in stocks:
-            hist, err = load_history(ticker, sim_period)
-            if hist is not None:
-                histories[ticker] = hist
+        with st.spinner(f"Loading {sim_period} Alpaca history and running the MAXPROFIT simulation..."):
+            histories={}; errors=[]
+            for ticker in stocks:
+                hist,err=load_history(ticker,sim_period)
+                if hist is not None: histories[ticker]=hist
+                else: errors.append(f"{ticker}: {err}")
+            if len(histories)<1: st.error("No usable Alpaca historical data was available.")
             else:
-                errors.append(f"{ticker}: {err}")
-        if histories:
-            result = simulate_strategy(histories, float(starting_capital), float(allocation_pct),
-                                       int(max_hold_days), float(max_risk_pct), float(max_volatility))
-            st.session_state.sim_result = result
-            st.session_state.sim_period = sim_period
-            st.session_state.sim_unavailable = errors
-        else:
-            st.session_state.sim_result = None
-            st.session_state.sim_unavailable = errors
-
-if "sim_result" in st.session_state and st.session_state.sim_result is not None:
-    result = st.session_state.sim_result
-    st.subheader("📈 Simulation Results")
-    r1, r2, r3, r4 = st.columns(4)
-    r1.metric("Starting Capital", f"${result['starting']:,.2f}")
-    r2.metric("Ending Capital", f"${result['ending']:,.2f}", f"${result['net']:,.2f}")
-    r3.metric("Total Return", f"{result['return_pct']:.2f}%")
-    r4.metric("Max Drawdown", f"{result['max_dd']:.2f}%")
-    r5, r6, r7 = st.columns(3)
-    r5.metric("Completed Trades", len(result["trades"]))
-    r6.metric("Win Rate", f"{result['win_rate']:.1f}%")
-    r7.metric("Risk-Gated Signals", result["blocked"])
-    if result["net"] > 0:
-        st.success(f"Simulation finished profitable: **+${result['net']:,.2f}** over the tested period. This is historical simulation, not a promise of future profit.")
-    elif result["net"] < 0:
-        st.error(f"Simulation finished negative: **${result['net']:,.2f}** over the tested period. That is useful information for tuning the strategy.")
-    else:
-        st.info("Simulation finished approximately flat.")
-
-    curve = result["curve"].set_index("Date")
-    st.line_chart(curve[["Equity"]])
-    if not result["trades"].empty:
-        st.subheader("📋 Automatic BUY → HOLD → SELL Ledger")
-        st.dataframe(result["trades"], use_container_width=True, hide_index=True)
-    else:
-        st.warning("No completed trades occurred in this historical window with the current settings. Try a longer period, different universe, or less restrictive risk settings.")
-    st.caption(f"Walk-forward test used {st.session_state.get('sim_period', 'selected')} historical data. Entries execute on the next available day's open after a signal, and open positions are closed at the end of the test.")
-
-if "sim_unavailable" in st.session_state and st.session_state.sim_unavailable:
-    with st.expander("Historical data warnings"):
-        for err in st.session_state.sim_unavailable:
-            st.write(f"⚠️ {err}")
-
-st.divider()
-st.header("📊 Selected Stock Evidence")
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Price", f"${ind['price']:.2f}")
-m2.metric("20D Momentum", f"{ind['momentum20']:.2f}%")
-m3.metric("Volatility", f"{ind['volatility']:.1f}%")
-m4.metric("Volume Ratio", f"{ind['volume_ratio']:.2f}x")
-
-chart, chart_err = load_history(selected, "6mo")
-if chart is None:
-    chart = make_demo_market(int(seed) + sum(map(ord, selected)))
-chart["SMA20"] = chart["close"].rolling(20).mean()
-chart["SMA50"] = chart["close"].rolling(50).mean()
-st.line_chart(chart[["close", "SMA20", "SMA50"]])
-
-st.header("🧪 Decision Replay / Audit Log")
-if st.session_state.decision_log:
-    st.dataframe(pd.DataFrame(st.session_state.decision_log), use_container_width=True, hide_index=True)
-else:
-    st.info("No paper decisions recorded yet.")
-
-st.divider()
-st.header("🔌 IBKR Connection")
-st.info("IBKR remains intentionally disconnected. When the IBKR paper account is ready, this order-control layer will be connected to paper execution only.")
-st.caption("VAST CASH • MAXPROFIT + AI HELPER • Paper Validation Build 4.0 • Historical Simulation")
+                for e in errors: st.warning(e)
+                result=simulate_strategy(histories,starting_capital,allocation_pct,max_hold_days,max_risk_pct,max_volatility)
+                if result:
+                    m1,m2,m3,m4=st.columns(4); m1.metric("Ending Capital",f"${result['ending']:,.2f}"); m2.metric("Net P&L",f"${result['net']:,.2f}",f"{result['return_pct']:.2f}%"); m3.metric("Win Rate",f"{result['win_rate']:.1f}%"); m4.metric("Max Drawdown",f"{result['max_dd']:.2f}%")
+                    st.line_chart(result["curve"].set_index("Date")["Equity"])
+                    st.subheader("Trade Ledger")
+                    if result["trades"].empty: st.info("No qualifying trades were generated under the current settings.")
+                    else: st.dataframe(result["trades"],use_container_width=True,hide_index=True)
+                    st.caption(f"Risk-gate blocks encountered during the walk-forward test: {result['blocked']}")
