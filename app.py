@@ -11,6 +11,14 @@ PAPER_ONLY = True
 ALPACA_TRADE_URL = "https://paper-api.alpaca.markets"
 ALPACA_DATA_URL = "https://data.alpaca.markets"
 
+# A liquid starting universe. MAXPROFIT chooses the top 10 from this universe each quarter.
+MARKET_UNIVERSE = [
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "AVGO", "TSLA", "AMD",
+    "NFLX", "ORCL", "CRM", "ADBE", "QCOM", "INTC", "MU", "AMAT", "LRCX", "TXN",
+    "JPM", "BAC", "WFC", "GS", "MS", "V", "MA", "C", "JNJ", "UNH",
+    "XOM", "CVX", "COST", "WMT", "HD", "LOW", "CAT", "GE", "BA", "DIS"
+]
+
 
 def _find_secret(mapping, names):
     if not isinstance(mapping, Mapping):
@@ -53,16 +61,14 @@ def alpaca_headers():
     return {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret} if key and secret else None
 
 
-def period_start(period):
-    days = {"3mo": 95, "6mo": 190, "1y": 370, "2y": 740, "3y": 1100, "5y": 1850}
-    return (datetime.now(timezone.utc) - timedelta(days=days[period])).date().isoformat()
-
-
-def load_history(symbol, period):
+def load_history(symbol, start_date, end_date):
     headers = alpaca_headers()
     if not headers:
         return None, "Alpaca paper credentials are unavailable."
-    params = {"timeframe": "1Day", "start": period_start(period), "end": datetime.now(timezone.utc).date().isoformat(), "limit": 10000, "adjustment": "all", "feed": "iex", "sort": "asc"}
+    params = {
+        "timeframe": "1Day", "start": start_date, "end": end_date,
+        "limit": 10000, "adjustment": "all", "feed": "iex", "sort": "asc"
+    }
     bars = []
     token = None
     try:
@@ -96,131 +102,194 @@ def load_history(symbol, period):
         return None, f"Alpaca market-data error: {exc}"
 
 
-def score(ind):
-    s = 50
-    if ind["price"] > ind["sma20"]: s += 15
-    else: s -= 15
-    if ind["sma20"] > ind["sma50"]: s += 15
-    else: s -= 15
-    if ind["momentum"] > 3: s += 15
-    elif ind["momentum"] < -3: s -= 15
-    if ind["volume_ratio"] >= 1.1: s += 5
-    if ind["volatility"] > 55: s -= 15
-    elif ind["volatility"] < 18: s += 5
-    return max(0, min(100, s))
+def quarter_windows(start_date, end_date):
+    start = pd.Timestamp(start_date)
+    end = pd.Timestamp(end_date)
+    windows = []
+    cursor = start
+    while cursor < end:
+        q_end = min(cursor + pd.DateOffset(months=3), end)
+        windows.append((cursor, q_end))
+        cursor = q_end
+    return windows
 
 
-def indicators(d):
-    c = d["close"]
-    if len(c) < 51:
-        return None
-    sma20 = c.rolling(20).mean().iloc[-1]
-    sma50 = c.rolling(50).mean().iloc[-1]
-    momentum = (c.iloc[-1] / c.iloc[-21] - 1) * 100
-    volatility = c.pct_change().rolling(20).std().iloc[-1] * math.sqrt(252) * 100
-    avg_volume = d["volume"].rolling(20).mean().iloc[-1]
-    return {"price": float(c.iloc[-1]), "sma20": float(sma20), "sma50": float(sma50), "momentum": float(momentum), "volatility": float(volatility), "volume_ratio": float(d["volume"].iloc[-1] / avg_volume if avg_volume else 0)}
+def select_top_10(history_by_symbol, quarter_start):
+    # Only use the 63 trading days immediately BEFORE the quarter begins.
+    scores = []
+    qstart = pd.Timestamp(quarter_start)
+    for ticker, df in history_by_symbol.items():
+        prior = df[df.index < qstart].tail(63)
+        if len(prior) < 50:
+            continue
+        ret = float(prior["close"].iloc[-1] / prior["close"].iloc[0] - 1) * 100
+        scores.append((ticker, ret))
+    scores.sort(key=lambda x: x[1], reverse=True)
+    return scores[:10]
 
 
-def signal(ind):
-    s = score(ind)
-    return "BUY" if s >= 70 else "SELL" if s <= 35 else "HOLD"
+def simulate_quarter(df, quarter_start, quarter_end, starting_capital, buy_drop_pct=15.0, profit_target_pct=8.0):
+    # Buy when price is <= 15% below the rolling 60-trading-day high.
+    # Sell at the first later close >= 8% above actual entry, using next-day open execution.
+    data = df[(df.index >= pd.Timestamp(quarter_start)) & (df.index <= pd.Timestamp(quarter_end))].copy()
+    if len(data) < 2:
+        return starting_capital, []
 
-
-def simulate_symbol(df, starting_capital, allocation_pct, hold_days):
     cash = starting_capital
+    position = None
     trades = []
-    i = 51
-    while i < len(df) - 1:
-        hist = df.iloc[:i]
-        ind = indicators(hist)
-        if not ind:
-            i += 1
-            continue
-        sig = signal(ind)
-        if sig != "BUY":
-            i += 1
-            continue
-        entry_i = i + 1
-        entry = float(df["open"].iloc[entry_i])
-        dollars = cash * allocation_pct / 100
-        qty = int(dollars // entry)
-        if qty < 1:
-            i += 1
-            continue
-        last_i = min(entry_i + hold_days, len(df) - 1)
-        exit_i = entry_i
-        for j in range(entry_i + 1, last_i + 1):
-            h = df.iloc[:j]
-            ind2 = indicators(h)
-            if ind2 and signal(ind2) == "SELL":
-                exit_i = j + 1 if j + 1 < len(df) else j
-                break
-            exit_i = j
-        exit_price = float(df["open"].iloc[exit_i])
-        pnl = (exit_price - entry) * qty
-        cash += pnl
-        trades.append({"Buy Date": df.index[entry_i].date(), "Sell Date": df.index[exit_i].date(), "Shares": qty, "Buy": round(entry, 2), "Sell": round(exit_price, 2), "Hold Days": exit_i - entry_i, "P/L": round(pnl, 2), "Return %": round((exit_price / entry - 1) * 100, 2)})
-        i = max(exit_i + 1, i + 1)
+    for i in range(1, len(data) - 1):
+        row = data.iloc[i]
+        if position is None:
+            prior = df[df.index <= data.index[i]].tail(60)
+            if len(prior) < 20:
+                continue
+            rolling_high = float(prior["close"].max())
+            buy_trigger = rolling_high * (1 - buy_drop_pct / 100)
+            if float(row["close"]) <= buy_trigger:
+                entry_i = i + 1
+                entry_price = float(data["open"].iloc[entry_i])
+                dollars = cash * 0.50
+                qty = int(dollars // entry_price)
+                if qty >= 1:
+                    position = {
+                        "entry_i": entry_i,
+                        "entry_price": entry_price,
+                        "qty": qty,
+                        "entry_date": data.index[entry_i].date(),
+                    }
+                    cash -= qty * entry_price
+        else:
+            target = position["entry_price"] * (1 + profit_target_pct / 100)
+            if float(row["close"]) >= target:
+                exit_i = i + 1
+                exit_price = float(data["open"].iloc[exit_i])
+                pnl = (exit_price - position["entry_price"]) * position["qty"]
+                cash += position["qty"] * exit_price
+                trades.append({
+                    "Buy Date": position["entry_date"], "Sell Date": data.index[exit_i].date(),
+                    "Shares": position["qty"], "Buy": round(position["entry_price"], 2),
+                    "Sell": round(exit_price, 2), "P/L": round(pnl, 2),
+                    "Return %": round((exit_price / position["entry_price"] - 1) * 100, 2),
+                    "Reason": "+8% target"
+                })
+                position = None
+
+    # Mark an unfinished quarter position to market. It is not counted as a completed win.
+    if position is not None:
+        last_close = float(data["close"].iloc[-1])
+        cash += position["qty"] * last_close
+        trades.append({
+            "Buy Date": position["entry_date"], "Sell Date": data.index[-1].date(),
+            "Shares": position["qty"], "Buy": round(position["entry_price"], 2),
+            "Sell": round(last_close, 2),
+            "P/L": round((last_close - position["entry_price"]) * position["qty"], 2),
+            "Return %": round((last_close / position["entry_price"] - 1) * 100, 2),
+            "Reason": "Quarter end mark-to-market"
+        })
     return cash, trades
 
 
 st.title("💰 VAST CASH")
-st.subheader("MAXPROFIT SIMULATOR")
-st.write("Test the strategy against real historical market data. No live trades are sent by the simulator.")
+st.subheader("MAXPROFIT QUARTERLY ENGINE")
+st.write("Find strong stocks from the previous quarter, buy reasonable pullbacks, and sell automatically when the profit target is reached. Historical simulation only. No live trades are sent.")
 
 col1, col2, col3 = st.columns(3)
 with col1:
     capital = st.number_input("Starting money", min_value=100.0, value=1000.0, step=100.0)
 with col2:
-    period = st.selectbox("Test period", ["3mo", "6mo", "1y", "2y", "3y", "5y"], index=1)
+    test_days = st.number_input("Test length (calendar days)", min_value=180, max_value=3650, value=365, step=30)
 with col3:
-    hold_days = st.number_input("Maximum hold (trading days)", min_value=1, max_value=30, value=6, step=1)
+    buy_drop = st.number_input("Buy up to % below recent high", min_value=5.0, max_value=30.0, value=15.0, step=1.0)
 
-stock_text = st.text_area("Stocks to test (up to 10, one per line)", "AAPL\nMSFT\nNVDA\nAMZN\nMETA\nGOOGL\nTSLA\nAMD\nAVGO\nJPM", height=150)
-stocks = list(dict.fromkeys(s.strip().upper() for s in stock_text.replace(",", "\n").splitlines() if s.strip()))[:10]
-allocation = 50.0
+profit_target = st.number_input("Sell at % above actual purchase price", min_value=3.0, max_value=30.0, value=8.0, step=1.0)
 
-if st.button("▶️ RUN SIMULATION", type="primary", width="stretch"):
-    if not alpaca_headers():
+st.info("MAXPROFIT automatically selects the 10 strongest stocks from the preceding 3 months. It then looks for pullbacks of the selected stocks during the following quarter. No fixed hold-days rule is used.")
+
+if st.button("▶️ RUN MAXPROFIT SIMULATION", type="primary", width="stretch"):
+    headers = alpaca_headers()
+    if not headers:
         st.error("Alpaca paper credentials are not available. Check Streamlit Secrets.")
         st.stop()
-    all_trades = []
-    ending_total = 0.0
+
+    end = datetime.now(timezone.utc).date()
+    requested_start = (datetime.now(timezone.utc) - timedelta(days=int(test_days))).date()
+    data_start = requested_start - timedelta(days=120)
+    end_iso = end.isoformat()
+    start_iso = data_start.isoformat()
+
+    histories = {}
     progress = st.progress(0)
-    for n, ticker in enumerate(stocks):
-        hist, err = load_history(ticker, period)
-        if hist is None or len(hist) < 60:
-            st.warning(f"{ticker}: {err or 'Not enough history'}")
-            progress.progress((n + 1) / len(stocks))
+    status = st.empty()
+    for n, ticker in enumerate(MARKET_UNIVERSE):
+        status.write(f"Loading market history: {ticker} ({n + 1}/{len(MARKET_UNIVERSE)})")
+        hist, err = load_history(ticker, start_iso, end_iso)
+        if hist is not None and len(hist) >= 50:
+            histories[ticker] = hist
+        progress.progress((n + 1) / len(MARKET_UNIVERSE))
+
+    if not histories:
+        st.error("No usable market history was returned.")
+        st.stop()
+
+    windows = quarter_windows(requested_start, end)
+    quarter_rows = []
+    all_trades = []
+    total_start = float(capital)
+    total_end = float(capital)
+
+    for qnum, (qstart, qend) in enumerate(windows, start=1):
+        selected = select_top_10(histories, qstart)
+        if not selected:
             continue
-        ending, trades = simulate_symbol(hist, capital, allocation, int(hold_days))
-        ending_total += ending
-        for t in trades:
-            t["Ticker"] = ticker
-            all_trades.append(t)
-        progress.progress((n + 1) / len(stocks))
-    if stocks:
-        ending_capital = ending_total / len(stocks) if ending_total else capital
-    else:
-        ending_capital = capital
-    pnl = ending_capital - capital
-    ret = pnl / capital * 100 if capital else 0
-    winners = [t for t in all_trades if t["P/L"] > 0]
-    losers = [t for t in all_trades if t["P/L"] < 0]
+        selected_names = [x[0] for x in selected]
+        # Equal starting capital per quarter, with gains/losses carried forward.
+        quarter_start_capital = total_end
+        quarter_end_capital = quarter_start_capital
+        qtr_trades = []
+        for ticker in selected_names:
+            ending, trades = simulate_quarter(histories[ticker], qstart, qend, quarter_start_capital / 10, buy_drop, profit_target)
+            quarter_end_capital += ending - (quarter_start_capital / 10)
+            for trade in trades:
+                trade["Ticker"] = ticker
+                trade["Quarter"] = f"{qstart.date()} to {qend.date()}"
+                qtr_trades.append(trade)
+        total_end = quarter_end_capital
+        all_trades.extend(qtr_trades)
+        quarter_rows.append({
+            "Quarter": f"{qstart.date()} to {qend.date()}",
+            "Top 10": ", ".join(selected_names),
+            "Start Capital": round(quarter_start_capital, 2),
+            "End Capital": round(quarter_end_capital, 2),
+            "Quarter P/L": round(quarter_end_capital - quarter_start_capital, 2),
+            "Trades": len(qtr_trades),
+        })
+
+    pnl = total_end - total_start
+    ret = pnl / total_start * 100 if total_start else 0
+    completed = [t for t in all_trades if t["Reason"] == "+8% target"]
+    winners = [t for t in completed if t["P/L"] > 0]
+
     st.divider()
     a, b, c, d = st.columns(4)
-    a.metric("Starting Capital", f"${capital:,.2f}")
-    b.metric("Ending Capital", f"${ending_capital:,.2f}")
+    a.metric("Starting Capital", f"${total_start:,.2f}")
+    b.metric("Ending Capital", f"${total_end:,.2f}")
     c.metric("Profit / Loss", f"${pnl:+,.2f}")
     d.metric("Return", f"{ret:+.2f}%")
+
     a, b, c = st.columns(3)
-    a.metric("Trades", len(all_trades))
-    b.metric("Win Rate", f"{len(winners) / len(all_trades) * 100:.1f}%" if all_trades else "0.0%")
-    c.metric("Best Trade", f"${max((t['P/L'] for t in all_trades), default=0):+.2f}")
+    a.metric("Completed +8% Sales", len(completed))
+    b.metric("Target Win Rate", f"{len(winners) / len(completed) * 100:.1f}%" if completed else "0.0%")
+    c.metric("All Entries", len(all_trades))
+
+    if quarter_rows:
+        st.subheader("Quarter-by-Quarter Results")
+        st.dataframe(pd.DataFrame(quarter_rows), width="stretch", hide_index=True)
+
     if all_trades:
         st.subheader("Trade Results")
         st.dataframe(pd.DataFrame(all_trades).sort_values("Buy Date"), width="stretch", hide_index=True)
     else:
-        st.info("No BUY signals occurred during the selected test period.")
-    st.caption("This is a historical simulation, not a guarantee of future performance. It uses the MAXPROFIT signal rules and next-day-open entries with an automatic maximum hold.")
+        st.info("No qualifying pullback trades occurred during the selected test period.")
+
+    st.caption("MAXPROFIT uses only information available before each quarter to select the top 10. The simulator is historical evidence, not a guarantee of future performance. It does not send live orders.")
