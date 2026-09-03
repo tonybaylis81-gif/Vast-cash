@@ -1,5 +1,6 @@
 import math
 import os
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 import pandas as pd
 import requests
@@ -13,30 +14,34 @@ ALPACA_DATA_URL = "https://data.alpaca.markets"
 
 def _find_secret_in_mapping(mapping, wanted_names):
     """Find a secret by name at the root or inside any TOML section."""
+    if not isinstance(mapping, Mapping):
+        return None
     wanted = {str(x).strip().upper() for x in wanted_names}
-    try:
-        for key, value in mapping.items():
-            if str(key).strip().upper() in wanted and value is not None:
-                text = str(value).strip()
-                if text:
-                    return text
-            if isinstance(value, dict):
-                found = _find_secret_in_mapping(value, wanted_names)
-                if found:
-                    return found
-    except Exception:
-        pass
+    for key in mapping:
+        try:
+            value = mapping[key]
+        except Exception:
+            continue
+        if str(key).strip().upper() in wanted and value is not None:
+            text = str(value).strip()
+            if text:
+                return text
+        if isinstance(value, Mapping):
+            found = _find_secret_in_mapping(value, wanted_names)
+            if found:
+                return found
     return None
 
 
 def get_secret(*names):
-    # Streamlit supports both root-level secrets and nested TOML sections.
+    # Check Streamlit secrets first. This handles root-level and nested TOML sections.
     try:
         found = _find_secret_in_mapping(st.secrets, names)
         if found:
             return found
     except Exception:
         pass
+    # Root-level Streamlit secrets are also exposed as environment variables.
     for name in names:
         value = os.getenv(name)
         if value is not None and str(value).strip():
@@ -61,7 +66,13 @@ def alpaca_headers():
 def alpaca_account():
     headers = alpaca_headers()
     if not headers:
-        return None, "Streamlit Secrets could not find your Alpaca API key and secret key."
+        key, secret = alpaca_credentials()
+        missing = []
+        if not key:
+            missing.append("API key")
+        if not secret:
+            missing.append("secret key")
+        return None, "Streamlit Secrets could not find your Alpaca " + " and ".join(missing) + "."
     try:
         r = requests.get(f"{ALPACA_TRADE_URL}/v2/account", headers=headers, timeout=15)
         if r.status_code != 200:
@@ -170,6 +181,8 @@ if account:
 else:
     st.error("🔴 ALPACA PAPER CONNECTION FAILED")
     st.code(account_error or "Unknown connection error")
+    key, secret = alpaca_credentials()
+    st.caption(f"Credential detection: API key {'FOUND' if key else 'NOT FOUND'} • Secret key {'FOUND' if secret else 'NOT FOUND'} • values hidden")
     st.caption("Paper endpoint: paper-api.alpaca.markets/v2. Keys are read from Streamlit Secrets and are never displayed.")
 
 c1,c2,c3,c4=st.columns(4); c1.metric("System","ONLINE"); c2.metric("Broker","ALPACA • PAPER" if account else "ALPACA • ERROR"); c3.metric("Mode","PAPER ONLY"); c4.metric("Live Orders","DISABLED")
