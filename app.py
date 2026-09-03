@@ -127,15 +127,12 @@ def paper_buy_with_target(symbol,budget_pct,total_slots,sell_target):
     try:
         buying_power=float(account.get("buying_power",0)); budget=buying_power*(float(budget_pct)/100)/max(1,int(total_slots))
         if budget<1:return False,"Paper buying power is too low for a share.",None
-        # Use notional market buy so the paper engine can deploy the calculated allocation cleanly.
-        body={"symbol":symbol,"notional":f"{budget:.2f}","side":"buy","type":"market","time_in_force":"day","client_order_id":f"vastcash-{symbol.lower()}-{int(time.time())}"}
+        body={"symbol":symbol,"notional":f"{budget:.2f}","side":"buy","type":"market","time_in_force":"day","client_order_id":f"vastcash-{symbol.lower()}-{int(time.time()*1000)}"}
         r=requests.post(f"{ALPACA_TRADE_URL}/v2/orders",headers={**headers,"Content-Type":"application/json"},json=body,timeout=20)
         if r.status_code not in (200,201): return False,f"BUY rejected: {r.text[:300]}",None
-        order=r.json(); oid=order.get("id")
-        filled=None
+        order=r.json(); oid=order.get("id"); filled=None
         for _ in range(10):
-            time.sleep(1)
-            q=requests.get(f"{ALPACA_TRADE_URL}/v2/orders/{oid}",headers=headers,timeout=10)
+            time.sleep(1); q=requests.get(f"{ALPACA_TRADE_URL}/v2/orders/{oid}",headers=headers,timeout=10)
             if q.status_code==200:
                 filled=q.json()
                 if filled.get("status") in ("filled","partially_filled","canceled","rejected","expired"): break
@@ -143,24 +140,12 @@ def paper_buy_with_target(symbol,budget_pct,total_slots,sell_target):
             return True,f"Paper BUY submitted for {symbol}; waiting for fill. Order ID {oid}.",oid
         fill=float(filled["filled_avg_price"]); qty=float(filled.get("filled_qty") or 0); target=round(fill*(1+float(sell_target)/100),2)
         if qty<=0:return True,f"Paper BUY filled but no quantity was reported yet. Order ID {oid}.",oid
-        sell_body={"symbol":symbol,"qty":f"{qty:.9f}".rstrip("0").rstrip("."),"side":"sell","type":"limit","time_in_force":"gtc","limit_price":f"{target:.2f}","client_order_id":f"vastcash-tp-{symbol.lower()}-{int(time.time())}"}
+        sell_body={"symbol":symbol,"qty":f"{qty:.9f}".rstrip("0").rstrip("."),"side":"sell","type":"limit","time_in_force":"gtc","limit_price":f"{target:.2f}","client_order_id":f"vastcash-tp-{symbol.lower()}-{int(time.time()*1000)}"}
         sr=requests.post(f"{ALPACA_TRADE_URL}/v2/orders",headers={**headers,"Content-Type":"application/json"},json=sell_body,timeout=20)
         if sr.status_code not in (200,201): return True,f"Paper BUY filled at ${fill:.2f}, but target SELL could not be attached: {sr.text[:250]}",oid
         sid=sr.json().get("id")
         return True,f"PAPER BUY FILLED: {symbol} {qty:g} shares @ ${fill:.2f}. Automatic +{sell_target:.1f}% target SELL placed at ${target:.2f}.",{"buy_order_id":oid,"sell_order_id":sid,"fill":fill,"target":target,"qty":qty}
     except Exception as exc:return False,f"Paper execution error: {exc}",None
-
-def run_strategy(histories,windows,selections,capital,buy_drop,sell_target,top_n,allocation):
-    total_start=total_end=float(capital); all_trades=[]; quarters=[]
-    for qstart,qend in windows:
-        selected=selections.get(str(qstart.date()),[])[:int(top_n)]
-        if not selected:continue
-        q_start=total_end; q_end_cap=total_end; per=q_start/max(1,int(top_n)); qtr=[]
-        for item in selected:
-            ending,trades=simulate_quarter(histories[item["Ticker"]],qstart,qend,per,buy_drop,sell_target,allocation); q_end_cap+=ending-per
-            for trade in trades: trade["Ticker"]=item["Ticker"]; qtr.append(trade)
-        total_end=q_end_cap; all_trades+=qtr; quarters.append({"Quarter":f"{qstart.date()} to {qend.date()}","Predicted Stocks":", ".join(x["Ticker"] for x in selected),"Start Capital":round(q_start,2),"End Capital":round(q_end_cap,2),"Quarter P/L":round(q_end_cap-q_start,2),"Trades":len(qtr)})
-    pnl=total_end-total_start; return {"Ending Capital":total_end,"Profit / Loss":pnl,"Return %":pnl/total_start*100 if total_start else 0,"quarters":quarters,"trades":all_trades}
 
 def simulate_quarter(df,start,end,capital,buy_drop,sell_target,allocation):
     data=df[(df.index>=pd.Timestamp(start))&(df.index<=pd.Timestamp(end))]
@@ -183,11 +168,22 @@ def simulate_quarter(df,start,end,capital,buy_drop,sell_target,allocation):
         last=float(data.close.iloc[-1]);cash+=position["qty"]*last;trades.append({"Buy Date":position["date"],"Sell Date":data.index[-1].date(),"Shares":position["qty"],"Buy":round(position["entry"],2),"Sell":round(last,2),"P/L":round((last-position["entry"])*position["qty"],2),"Return %":round((last/position["entry"]-1)*100,2),"Reason":"Quarter-end mark-to-market"})
     return cash,trades
 
-def quarter_windows(start,end):
-    start,end=pd.Timestamp(start),pd.Timestamp(end); out=[]; cur=start
-    while cur<end:
-        qend=min(cur+pd.DateOffset(months=3),end);out.append((cur,qend));cur=qend
-    return out
+def run_strategy(histories,windows,selections,capital,buy_drop,sell_target,top_n,allocation):
+    total_start=total_end=float(capital); all_trades=[]; quarters=[]
+    for qstart,qend in windows:
+        selected=selections.get(str(qstart.date()),[])[:int(top_n)]
+        if not selected:continue
+        q_start=total_end; q_end_cap=total_end; per=q_start/max(1,int(top_n)); qtr=[]
+        for item in selected:
+            ending,trades=simulate_quarter(histories[item["Ticker"]],qstart,qend,per,buy_drop,sell_target,allocation); q_end_cap+=ending-per
+            for trade in trades: trade["Ticker"]=item["Ticker"]; qtr.append(trade)
+        total_end=q_end_cap; all_trades+=qtr; quarters.append({"Quarter":f"{qstart.date()} to {qend.date()}","Predicted Stocks":", ".join(x["Ticker"] for x in selected),"Start Capital":round(q_start,2),"End Capital":round(q_end_cap,2),"Quarter P/L":round(q_end_cap-q_start,2),"Trades":len(qtr)})
+    pnl=total_end-total_start; return {"Ending Capital":total_end,"Profit / Loss":pnl,"Return %":pnl/total_start*100 if total_start else 0,"quarters":quarters,"trades":all_trades}
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def build_predictions_cached(histories_items,windows_tuple,lookback,analogues):
+    histories=dict(histories_items); windows=[(pd.Timestamp(a),pd.Timestamp(b)) for a,b in windows_tuple]
+    return build_predictions(histories,windows,lookback,analogues)
 
 def build_predictions(histories,windows,lookback,analogues):
     selections={}; rows=[]
@@ -201,8 +197,31 @@ def build_predictions(histories,windows,lookback,analogues):
         for rank,item in enumerate(ranked[:20],1): row=dict(item);row["Rank"]=rank;row["Quarter"]=f"{qstart.date()} to {qend.date()}";rows.append(row)
     return selections,pd.DataFrame(rows)
 
+def discovery_fast(histories,train,capital):
+    """Coarse-to-fine discovery: fewer evaluations, then local refinement around the winner."""
+    base_sel,_=build_predictions(histories,train,63,8)
+    stage1=[]
+    for b,s in itertools.product(range(1,21,2),range(1,21,2)):
+        stage1.append((run_strategy(histories,train,base_sel,capital,b,s,10,30)["Return %"],b,s))
+    _,best_b,best_s=max(stage1,key=lambda x:x[0])
+    fine=[]
+    for b in range(max(1,best_b-2),min(20,best_b+2)+1):
+        for s in range(max(1,best_s-2),min(20,best_s+2)+1):
+            fine.append((run_strategy(histories,train,base_sel,capital,b,s,10,30)["Return %"],b,s))
+    _,buy_drop,sell_target=max(stage1+fine,key=lambda x:x[0])
+    stage2=[]
+    for n,a in itertools.product([5,10,15],[10,20,30,40,50]):
+        stage2.append((run_strategy(histories,train,base_sel,capital,buy_drop,sell_target,n,a)["Return %"],n,a))
+    _,top_n,allocation=max(stage2,key=lambda x:x[0])
+    stage3=[]
+    for lb,an in itertools.product([42,63,84],[4,8,12]):
+        sel,_=build_predictions(histories,train,lb,an)
+        stage3.append((run_strategy(histories,train,sel,capital,buy_drop,sell_target,top_n,allocation)["Return %"],lb,an))
+    _,lookback,analogues=max(stage3,key=lambda x:x[0])
+    return buy_drop,sell_target,top_n,allocation,lookback,analogues
+
 st.title("💰 VAST CASH"); st.subheader("MAXPROFIT • TOP 10 DECISION ENGINE")
-st.write("MAXPROFIT builds stock fingerprints, finds recurring historical patterns, ranks the Top 10, estimates hold time, and can deploy YES decisions into the connected **Alpaca PAPER account only**.")
+st.write("MAXPROFIT builds stock fingerprints, finds recurring historical patterns, ranks the Top 10, estimates hold time, and can deploy multiple YES decisions into the connected **Alpaca PAPER account only**.")
 capital=st.number_input("Simulation starting money",min_value=100.0,value=1000.0,step=100.0);test_days=st.number_input("Historical test length (days)",min_value=365,max_value=3650,value=730,step=30)
 c1,c2=st.columns(2)
 with c1: quick=st.button("⚡ FIND TOP 10 NOW",type="primary",width="stretch")
@@ -217,40 +236,53 @@ if quick or full:
     if full:
         windows=quarter_windows(requested_start,end)
         if len(windows)<3:st.error("Use at least one year of history.");st.stop()
-        split=max(1,int(len(windows)*.70));train,validation=windows[:split],windows[split:];train_sel,_=build_predictions(histories,train,63,8)
-        stage1=[]
-        for b,s in itertools.product(range(1,21),range(1,21)):stage1.append((run_strategy(histories,train,train_sel,capital,b,s,10,30)["Return %"],b,s))
-        _,buy_drop,sell_target=max(stage1,key=lambda x:x[0]);stage2=[]
-        for n,a in itertools.product([5,10,15],[10,20,30,40,50]):stage2.append((run_strategy(histories,train,train_sel,capital,buy_drop,sell_target,n,a)["Return %"],n,a))
-        _,top_n,allocation=max(stage2,key=lambda x:x[0]);stage3=[]
-        for lb,an in itertools.product([42,63,84],[4,8,12]):
-            sel,_=build_predictions(histories,train,lb,an);stage3.append((run_strategy(histories,train,sel,capital,buy_drop,sell_target,top_n,allocation)["Return %"],lb,an))
-        _,lookback,analogues=max(stage3,key=lambda x:x[0]);val_sel,_=build_predictions(histories,validation,lookback,analogues);val_result=run_strategy(histories,validation,val_sel,capital,buy_drop,sell_target,top_n,allocation)
-        st.success(f"Discovery complete: BUY pullback {buy_drop}%, SELL +{sell_target}%, Top {top_n}, allocation {allocation}%, lookback {lookback}, analogues {analogues}. Unseen validation {val_result['Return %']:.2f}%.")
+        split=max(1,int(len(windows)*.70));train,validation=windows[:split],windows[split:]
+        with st.spinner("⚔️ MAXPROFIT is testing the strategy and refining the best settings..."):
+            buy_drop,sell_target,top_n,allocation,lookback,analogues=discovery_fast(histories,train,capital)
+            val_sel,_=build_predictions(histories,validation,lookback,analogues);val_result=run_strategy(histories,validation,val_sel,capital,buy_drop,sell_target,top_n,allocation)
+        st.success(f"Discovery complete: BUY pullback {buy_drop}%, SELL +{sell_target}%, Top {top_n}, allocation {allocation}%, lookback {lookback}, analogues {analogues}.")
+        st.metric("🧪 Unseen validation return",f"{val_result['Return %']:.2f}%")
+        if val_result["quarters"]: st.dataframe(pd.DataFrame(val_result["quarters"]),use_container_width=True,hide_index=True)
     as_of=max(df.index.max() for df in histories.values());ranked=[]
     for ticker,df in histories.items():
         track=current_track(df,as_of,lookback,analogues,buy_drop,sell_target)
         if track:ranked.append((ticker,track))
     ranked.sort(key=lambda x:(x[1]["prediction"],x[1]["positive"],-x[1]["uncertainty"]),reverse=True);ranked=ranked[:10]
-    st.subheader("🔥 MAXPROFIT TOP 10 • YES = DEPLOY TO PAPER BROKERAGE")
+    st.subheader("🔥 MAXPROFIT TOP 10 • CHOOSE YES/NO FOR MULTIPLE STOCKS")
     st.caption(f"Model date: {as_of.date()} • BUY reference: {buy_drop}% pullback • SELL target: +{sell_target}% from actual filled purchase price • PAPER ONLY")
     if "paper_choices" not in st.session_state:st.session_state.paper_choices={}
     if "paper_orders" not in st.session_state:st.session_state.paper_orders={}
+    yes_count=sum(1 for t in ranked if st.session_state.paper_choices.get(t[0])=="YES")
+    if yes_count: st.info(f"✅ {yes_count} stock(s) marked YES. You can deploy all selected YES decisions together, up to all 10.")
     for rank,(ticker,t) in enumerate(ranked,1):
-        sell_date=next_business_date(as_of,t["hold_days"]);cols=st.columns([.4,.7,1,1,1,1,1.35,1.7]);cols[0].markdown(f"### #{rank}");cols[1].markdown(f"### {ticker}");cols[2].metric("Predicted",f"{t['prediction']*100:.1f}%");cols[3].metric("Buy Trigger",f"${t['buy_trigger']:.2f}");cols[4].metric("Target Ref.",f"${t['target_reference']:.2f}");cols[5].metric("Hold",f"~{t['hold_days']} days");cols[6].markdown(f"**Suggested sell:** {sell_date}\n\n{t['status']}")
-        yes_key,no_key=f"yes_{ticker}",f"no_{ticker}"
-        if cols[7].button("✅ BUY YES",key=yes_key,use_container_width=True):
-            if ticker not in st.session_state.paper_orders:
-                ok,msg,info=paper_buy_with_target(ticker,allocation,len(ranked),sell_target);st.session_state.paper_choices[ticker]="YES";st.session_state.paper_orders[ticker]={"ok":ok,"message":msg,"info":info}
-            else:st.session_state.paper_choices[ticker]="YES"
-        if cols[7].button("❌ BUY NO",key=no_key,use_container_width=True):st.session_state.paper_choices[ticker]="NO"
-        choice=st.session_state.paper_choices.get(ticker,"UNDECIDED");st.write(f"**Paper decision:** {choice} | Current ${t['price']:.2f} | Historical positive rate {t['positive']*100:.0f}% | Uncertainty ±{t['uncertainty']*100:.1f}% | Matches {t['samples']}")
+        sell_date=next_business_date(as_of,t["hold_days"])
+        cols=st.columns([.35,.65,1,1,1,1,1.35,1.1,1.4])
+        cols[0].markdown(f"### #{rank}");cols[1].markdown(f"### {ticker}");cols[2].metric("Predicted",f"{t['prediction']*100:.1f}%");cols[3].metric("Buy Trigger",f"${t['buy_trigger']:.2f}");cols[4].metric("Target Ref.",f"${t['target_reference']:.2f}");cols[5].metric("Hold",f"~{t['hold_days']}d");cols[6].markdown(f"**Suggested sell:** {sell_date}\n\n{t['status']}")
+        choice=cols[7].selectbox("Decision",["UNDECIDED","YES","NO"],index=["UNDECIDED","YES","NO"].index(st.session_state.paper_choices.get(ticker,"UNDECIDED")),key=f"decision_{ticker}",label_visibility="collapsed")
+        st.session_state.paper_choices[ticker]=choice
         if ticker in st.session_state.paper_orders:
             info=st.session_state.paper_orders[ticker];(st.success if info["ok"] else st.error)(info["message"])
-        st.write(f"**Why it ranked:** 3M momentum {t['details']['Momentum']*100:.1f}%, recent 20D {t['details']['Recent 20D']*100:.1f}%, volatility {t['details']['Volatility']*100:.1f}%, drawdown {t['details']['Drawdown']*100:.1f}%, volume ratio {t['details']['Volume Ratio']:.2f}x. Best analogue {t['best']*100:.1f}%, worst {t['worst']*100:.1f}%.");st.divider()
+        st.write(f"**{ticker}** | Current ${t['price']:.2f} | Historical positive rate {t['positive']*100:.0f}% | Uncertainty ±{t['uncertainty']*100:.1f}% | Matches {t['samples']} | Why ranked: 3M momentum {t['details']['Momentum']*100:.1f}%, recent 20D {t['details']['Recent 20D']*100:.1f}%, volatility {t['details']['Volatility']*100:.1f}%, drawdown {t['details']['Drawdown']*100:.1f}%, volume ratio {t['details']['Volume Ratio']:.2f}x. Best analogue {t['best']*100:.1f}%, worst {t['worst']*100:.1f}%.")
+        st.divider()
+    selected_yes=[ticker for ticker,_ in ranked if st.session_state.paper_choices.get(ticker)=="YES"]
+    if selected_yes:
+        st.subheader(f"🚀 READY TO DEPLOY {len(selected_yes)} YES DECISION(S)")
+        st.write("Review the YES list below. One tap sends the selected stocks to the PAPER account. NO decisions send nothing.")
+        st.code(", ".join(selected_yes))
+        if st.button(f"🚀 DEPLOY ALL {len(selected_yes)} YES TO PAPER",type="primary",width="stretch"):
+            results=[]
+            for ticker in selected_yes:
+                if ticker in st.session_state.paper_orders and st.session_state.paper_orders[ticker].get("ok"):
+                    results.append((ticker,True,"Already deployed in this session."));continue
+                ok,msg,info=paper_buy_with_target(ticker,allocation,len(ranked),sell_target)
+                st.session_state.paper_orders[ticker]={"ok":ok,"message":msg,"info":info}
+                results.append((ticker,ok,msg))
+            st.subheader("📋 PAPER DEPLOYMENT RESULTS")
+            for ticker,ok,msg in results:
+                (st.success if ok else st.error)(f"{ticker}: {msg}")
+    else:
+        st.info("Choose YES on any of the Top 10. You can mark one, several, or all 10, then deploy them together.")
     if ranked:
         ticker,t=ranked[0];st.subheader(f"👑 #1: {ticker}");st.write(f"{ticker} ranks #1 because its current fingerprint has the strongest modelled historical outcome in the scanned universe, supported by {t['samples']} matches and a {t['positive']*100:.0f}% positive match rate. Estimated hold: {t['hold_days']} trading days.")
-    if full:
-        st.subheader("🔬 Discovery results");st.write(f"Final settings: buy pullback {buy_drop}%, sell target +{sell_target}%, Top {top_n}, allocation {allocation}%, lookback {lookback}, analogues {analogues}.");st.metric("Unseen validation return",f"{val_result['Return %']:.2f}%")
 
-st.success("🔒 PAPER MODE LOCKED: YES sends a market BUY to the Alpaca PAPER account using the configured allocation. After the fill, VAST CASH places a GTC limit SELL at the configured percentage above the actual fill price. NO sends nothing. Live trading is not enabled.")
+st.success("🔒 PAPER MODE LOCKED: choose YES/NO across the Top 10, then deploy all YES decisions together. Each YES sends a market BUY to the Alpaca PAPER account using the configured allocation. After each fill, VAST CASH places a GTC limit SELL at the configured percentage above the actual fill price. NO sends nothing. Live trading is not enabled.")
