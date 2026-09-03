@@ -125,11 +125,9 @@ def market_state(df, as_of, lookback=63):
 
 
 def historical_prediction(df, quarter_start, lookback=63, analogues=8):
-    """Point-in-time analogue prediction. No future data is used to form the state."""
     current = market_state(df, quarter_start, lookback)
     if current is None:
         return None
-
     dates = df.index
     examples = []
     min_i = int(lookback) + 7
@@ -143,10 +141,8 @@ def historical_prediction(df, quarter_start, lookback=63, analogues=8):
             continue
         future_ret = float(future["close"].iloc[-1] / future["close"].iloc[0] - 1)
         examples.append((state, future_ret, dates[i]))
-
     if len(examples) < max(5, int(analogues)):
         return None
-
     states = np.array([x[0] for x in examples])
     scale = np.std(states, axis=0)
     scale[scale == 0] = 1.0
@@ -194,12 +190,10 @@ def simulate_quarter(df, quarter_start, quarter_end, starting_capital, buy_drop_
     data = df[(df.index >= pd.Timestamp(quarter_start)) & (df.index <= pd.Timestamp(quarter_end))].copy()
     if len(data) < 2:
         return float(starting_capital), []
-
     cash = float(starting_capital)
     position = None
     trades = []
     allocation = max(0.01, min(float(allocation_pct) / 100.0, 1.0))
-
     for i in range(1, len(data)):
         row = data.iloc[i]
         if position is None:
@@ -228,7 +222,6 @@ def simulate_quarter(df, quarter_start, quarter_end, starting_capital, buy_drop_
                     "Reason": f"+{float(profit_target_pct):.1f}% target"
                 })
                 position = None
-
     if position is not None:
         last_close = float(data["close"].iloc[-1])
         pnl = (last_close - position["entry_price"]) * position["qty"]
@@ -248,7 +241,6 @@ def run_strategy(histories, windows, selections, starting_capital, buy_drop, sel
     total_end = total_start
     all_trades = []
     quarter_rows = []
-
     for qstart, qend in windows:
         ranked = selections.get(str(qstart.date()), [])
         selected = ranked[:int(top_n)]
@@ -278,7 +270,6 @@ def run_strategy(histories, windows, selections, starting_capital, buy_drop, sel
             "Quarter P/L": round(q_end_cap - q_start, 2),
             "Trades": len(qtr_trades),
         })
-
     pnl = total_end - total_start
     ret = pnl / total_start * 100 if total_start else 0.0
     target_sales = [t for t in all_trades if "target" in t["Reason"]]
@@ -300,15 +291,12 @@ def run_strategy(histories, windows, selections, starting_capital, buy_drop, sel
 
 
 def evaluate_combo(histories, windows, selections, capital, combo):
-    return run_strategy(
-        histories, windows, selections, capital,
-        combo[0], combo[1], combo[2], combo[3]
-    )
+    return run_strategy(histories, windows, selections, capital, combo[0], combo[1], combo[2], combo[3])
 
 
 st.title("💰 VAST CASH")
 st.subheader("MAXPROFIT AUTOMATIC VARIABLE-DISCOVERY ENGINE")
-st.write("The machine now searches the strategy variables for you. You define the concept. MAXPROFIT does the repetitive testing, ranks the results, then checks the winner on historical data it did NOT use to choose the winner.")
+st.write("The machine searches the strategy variables for you, ranks the results, validates the winner on unseen history, and produces a current Top 10 stock watchlist from the same historical prediction engine. Historical simulation only. No live orders.")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -367,10 +355,7 @@ if st.button("⚔️ RUN MAXPROFIT AUTO-DISCOVERY", type="primary", width="stret
     status.write("Stage 2/4: testing stock-count and position-allocation variables...")
     stage2 = []
     for top_n, allocation in itertools.product([5, 10, 15], [10, 20, 30, 40, 50]):
-        result = evaluate_combo(
-            histories, train_windows, train_selections, capital,
-            (int(best1["Buy Pullback %"]), int(best1["Sell Target %"]), top_n, allocation)
-        )
+        result = evaluate_combo(histories, train_windows, train_selections, capital, (int(best1["Buy Pullback %"]), int(best1["Sell Target %"]), top_n, allocation))
         stage2.append({k: result[k] for k in ["Buy Pullback %", "Sell Target %", "Top N Stocks", "Position Allocation %", "Ending Capital", "Profit / Loss", "Return %", "Target Win Rate %", "All Trade Exits"]})
     stage2_df = pd.DataFrame(stage2).sort_values(["Return %", "Profit / Loss"], ascending=False).reset_index(drop=True)
     best2 = stage2_df.iloc[0]
@@ -379,10 +364,7 @@ if st.button("⚔️ RUN MAXPROFIT AUTO-DISCOVERY", type="primary", width="stret
     stage3 = []
     for lookback, analogues in itertools.product([42, 63, 84], [4, 8, 12]):
         selections, _ = build_predictions(histories, train_windows, lookback, analogues)
-        result = evaluate_combo(
-            histories, train_windows, selections, capital,
-            (int(best2["Buy Pullback %"]), int(best2["Sell Target %"]), int(best2["Top N Stocks"]), int(best2["Position Allocation %"]))
-        )
+        result = evaluate_combo(histories, train_windows, selections, capital, (int(best2["Buy Pullback %"]), int(best2["Sell Target %"]), int(best2["Top N Stocks"]), int(best2["Position Allocation %"])))
         row = {k: result[k] for k in ["Buy Pullback %", "Sell Target %", "Top N Stocks", "Position Allocation %", "Ending Capital", "Profit / Loss", "Return %", "Target Win Rate %", "All Trade Exits"]}
         row["Lookback Days"] = lookback
         row["Analogue Count"] = analogues
@@ -400,20 +382,47 @@ if st.button("⚔️ RUN MAXPROFIT AUTO-DISCOVERY", type="primary", width="stret
     final_analogues = int(best3["Analogue Count"])
 
     validation_selections, validation_predictions = build_predictions(histories, validation_windows, final_lookback, final_analogues)
-    validation_result = run_strategy(
-        histories, validation_windows, validation_selections, capital,
-        final_buy, final_sell, final_top, final_alloc
-    )
+    validation_result = run_strategy(histories, validation_windows, validation_selections, capital, final_buy, final_sell, final_top, final_alloc)
 
     full_selections, full_predictions = build_predictions(histories, windows, final_lookback, final_analogues)
-    full_result = run_strategy(
-        histories, windows, full_selections, capital,
-        final_buy, final_sell, final_top, final_alloc
-    )
+    full_result = run_strategy(histories, windows, full_selections, capital, final_buy, final_sell, final_top, final_alloc)
+
+    # CURRENT Top 10: use the most recent completed quarter-start prediction state.
+    latest_qstart, latest_qend = windows[-1]
+    latest_ranked = []
+    for ticker, df in histories.items():
+        pred = historical_prediction(df, latest_qstart, final_lookback, final_analogues)
+        if pred is None:
+            continue
+        prediction, uncertainty, samples, state = pred
+        latest_ranked.append({
+            "Rank": 0,
+            "Ticker": ticker,
+            "Predicted Next Quarter %": prediction * 100,
+            "Historical Uncertainty %": uncertainty * 100,
+            "History Matches": samples,
+            "3M Momentum %": state[0] * 100,
+            "Volatility %": state[1] * 100,
+            "Drawdown %": state[2] * 100,
+            "Suggested Buy Pullback %": final_buy,
+            "Suggested Sell Target %": final_sell,
+        })
+    latest_ranked.sort(key=lambda x: x["Predicted Next Quarter %"], reverse=True)
+    for rank, row in enumerate(latest_ranked[:10], 1):
+        row["Rank"] = rank
+    current_top10 = pd.DataFrame(latest_ranked[:10])
 
     status.success("MAXPROFIT discovery complete.")
 
-    st.success("MAXPROFIT found a candidate strategy, then tested it on unseen historical quarters. The validation result is the important reality check.")
+    st.success("MAXPROFIT found a candidate strategy, validated it on unseen historical quarters, and generated the current Top 10 stocks from the same prediction engine.")
+
+    st.subheader("🔥 MAXPROFIT CURRENT TOP 10 STOCKS")
+    st.write("These are the 10 stocks MAXPROFIT currently ranks highest for the next simulated quarter, using the discovered historical-model settings. They are a research watchlist, not guaranteed winners or personalized financial advice.")
+    if not current_top10.empty:
+        st.dataframe(current_top10, width="stretch", hide_index=True)
+        st.caption(f"Current ranking uses {final_lookback}-day historical states and {final_analogues} nearest historical analogues. The discovered simulated buy/sell settings are BUY -{final_buy}% from the recent high and SELL +{final_sell}% from the actual purchase price.")
+    else:
+        st.warning("MAXPROFIT could not produce a current Top 10 from the available historical data.")
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Best Buy Pullback", f"{final_buy}%")
@@ -447,27 +456,20 @@ if st.button("⚔️ RUN MAXPROFIT AUTO-DISCOVERY", type="primary", width="stret
 
     st.subheader("🔬 Stage 1: Buy/Sell Search")
     st.dataframe(stage1_df.head(25), width="stretch")
-
     st.subheader("🔬 Stage 2: Top-N + Allocation Search")
     st.dataframe(stage2_df.head(25), width="stretch")
-
     st.subheader("🔬 Stage 3: Lookback + Historical Analogue Search")
     st.dataframe(stage3_df.head(25), width="stretch")
-
     st.subheader("📊 Unseen Validation Quarters")
     st.dataframe(pd.DataFrame(validation_result["quarters"]), width="stretch")
-
     st.subheader("📈 Full Historical Run Using the Discovered Candidate")
     st.write(f"Full-period result: **{full_result['Return %']:.2f}%** from **${capital:,.2f}** to **${full_result['Ending Capital']:,.2f}**. This is descriptive historical simulation, not a forecast guarantee.")
     st.dataframe(pd.DataFrame(full_result["quarters"]), width="stretch")
-
     st.subheader("🤖 Predicted Stock Rankings")
     st.dataframe(full_predictions, width="stretch")
-
     st.subheader("💵 Candidate Trade Results")
     if full_result["trades"]:
         st.dataframe(pd.DataFrame(full_result["trades"]), width="stretch")
     else:
         st.info("No trades were triggered by the discovered candidate during the selected period.")
-
     st.caption("PAPER/SIMULATION ONLY. No live orders are placed by this application.")
