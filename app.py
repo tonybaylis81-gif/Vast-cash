@@ -1,6 +1,5 @@
 import os,time
 from collections.abc import Mapping
-from concurrent.futures import ThreadPoolExecutor,as_completed
 from datetime import datetime,timedelta,timezone
 import numpy as np,pandas as pd,requests,streamlit as st
 st.set_page_config(page_title='VAST CASH',page_icon='⚒️',layout='wide')
@@ -25,28 +24,23 @@ def hdr():
     k=secret(['PAPER_API_KEY','ALPACA_API_KEY','ALPACA_API_KEY_ID','API_KEY']); s=secret(['PAPER_API_SECRET','ALPACA_SECRET_KEY','ALPACA_API_SECRET','API_SECRET','SECRET_KEY'])
     return {'APCA-API-KEY-ID':k,'APCA-API-SECRET-KEY':s} if k and s else None
 @st.cache_data(ttl=21600,show_spinner=False)
-def hist(symbol):
-    h=hdr()
-    if not h:return None
-    e=datetime.now(timezone.utc).date(); q={'timeframe':'1Day','start':(e-timedelta(days=420)).isoformat(),'end':e.isoformat(),'limit':10000,'adjustment':'all','feed':'iex','sort':'asc'}
-    try:
-        r=requests.get(f'{DATA}/v2/stocks/{symbol}/bars',headers=h,params=q,timeout=12)
-        if r.status_code!=200:return None
-        b=r.json().get('bars',[])
-        if not b:return None
-        d=pd.DataFrame(b)[['t','o','h','c']]; d.columns=['date','open','high','close']; d.date=pd.to_datetime(d.date,utc=True).dt.tz_convert('America/New_York').dt.normalize().dt.tz_localize(None)
-        return d.set_index('date').sort_index().apply(pd.to_numeric,errors='coerce').dropna()
-    except Exception:return None
 def all_hist():
-    out={}
-    with ThreadPoolExecutor(max_workers=6) as p:
-        fs={p.submit(hist,s):s for s in UNIVERSE}
-        for f in as_completed(fs):
-            try:
-                d=f.result()
-                if d is not None and len(d)>=140:out[fs[f]]=d
-            except Exception:pass
-    return out
+    h=hdr()
+    if not h:return {}
+    e=datetime.now(timezone.utc).date(); start=(e-timedelta(days=240)).isoformat()
+    params={'symbols':','.join(UNIVERSE),'timeframe':'1Day','start':start,'end':e.isoformat(),'limit':1000,'adjustment':'all','feed':'iex','sort':'asc'}
+    try:
+        r=requests.get(f'{DATA}/v2/stocks/bars',headers=h,params=params,timeout=25)
+        if r.status_code!=200:return {}
+        raw=r.json().get('bars',{}); out={}
+        for s,b in raw.items():
+            if not b:continue
+            d=pd.DataFrame(b)[['t','o','h','c']]; d.columns=['date','open','high','close']
+            d.date=pd.to_datetime(d.date,utc=True).dt.tz_convert('America/New_York').dt.normalize().dt.tz_localize(None)
+            d=d.set_index('date').sort_index().apply(pd.to_numeric,errors='coerce').dropna()
+            if len(d)>=140:out[s]=d
+        return out
+    except Exception:return {}
 def score(s,d,hold,buy_drop):
     if len(d)<140:return None
     wins=[];rets=[];hs=[];start=70;stop=len(d)-hold-2;step=max(1,(stop-start)//90)
