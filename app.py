@@ -1,5 +1,4 @@
-import os, time
-import itertools
+import os
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -8,286 +7,326 @@ import pandas as pd
 import requests
 import streamlit as st
 
-st.set_page_config(page_title="VAST CASH", page_icon="💰", layout="wide")
+st.set_page_config(page_title="VAST CASH", page_icon="⚒️", layout="wide")
+
+# ============================================================
+# VAST CASH: STOCK TRADING FOR WELDERS
+# Simple front end. PAPER ONLY. No live orders.
+# ============================================================
 PAPER_ONLY = True
 DATA_URL = "https://data.alpaca.markets"
 TRADE_URL = "https://paper-api.alpaca.markets"
-UNIVERSE = ["AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","AVGO","TSLA","AMD","NFLX","ORCL","CRM","ADBE","QCOM","INTC","MU","AMAT","LRCX","TXN","JPM","BAC","WFC","GS","MS","V","MA","C","JNJ","UNH","XOM","CVX","COST","WMT","HD","LOW","CAT","GE","BA","DIS"]
+UNIVERSE = [
+    "AAPL","MSFT","NVDA","AMZN","META","GOOGL","GOOG","AVGO","TSLA","AMD",
+    "NFLX","ORCL","CRM","ADBE","QCOM","INTC","MU","AMAT","LRCX","TXN",
+    "JPM","BAC","WFC","GS","MS","V","MA","C","JNJ","UNH","XOM","CVX",
+    "COST","WMT","HD","LOW","CAT","GE","BA","DIS"
+]
 
 
 def _secret(names):
+    wanted = {x.strip().upper() for x in names}
     try:
-        s = st.secrets
-        wanted = {x.upper() for x in names}
-        def walk(x):
-            if isinstance(x, Mapping):
-                for k, v in x.items():
-                    if str(k).upper() in wanted and str(v).strip(): return str(v).strip()
-                    z = walk(v)
-                    if z: return z
-        z = walk(s)
-        if z: return z
+        def walk(value):
+            if isinstance(value, Mapping):
+                for key, item in value.items():
+                    if str(key).strip().upper() in wanted and item is not None and str(item).strip():
+                        return str(item).strip()
+                    found = walk(item)
+                    if found:
+                        return found
+            return None
+        found = walk(st.secrets)
+        if found:
+            return found
     except Exception:
         pass
-    for n in names:
-        if os.getenv(n): return os.getenv(n).strip()
+    for name in names:
+        value = os.getenv(name)
+        if value and value.strip():
+            return value.strip()
     return None
 
 
-def headers():
-    k = _secret(["PAPER_API_KEY","ALPACA_API_KEY","ALPACA_API_KEY_ID","API_KEY"])
-    s = _secret(["PAPER_API_SECRET","ALPACA_SECRET_KEY","ALPACA_API_SECRET","API_SECRET","SECRET_KEY"])
-    return {"APCA-API-KEY-ID": k, "APCA-API-SECRET-KEY": s} if k and s else None
+def alpaca_headers():
+    key = _secret(["PAPER_API_KEY", "ALPACA_API_KEY", "ALPACA_API_KEY_ID", "API_KEY"])
+    secret = _secret(["PAPER_API_SECRET", "ALPACA_SECRET_KEY", "ALPACA_API_SECRET", "API_SECRET", "SECRET_KEY"])
+    if not key or not secret:
+        return None
+    return {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
 
 
 @st.cache_data(ttl=21600, show_spinner=False)
-def load_history(symbol, start, end):
-    h = headers()
-    if not h: return None
-    p = {"timeframe":"1Day","start":start,"end":end,"limit":10000,"adjustment":"all","feed":"iex","sort":"asc"}
-    bars = []; token = None
+def load_history(symbol, days=420):
+    headers = alpaca_headers()
+    if not headers:
+        return None
+    end = datetime.now(timezone.utc).date()
+    start = (datetime.now(timezone.utc) - timedelta(days=days)).date()
+    params = {
+        "timeframe": "1Day", "start": start.isoformat(), "end": end.isoformat(),
+        "limit": 10000, "adjustment": "all", "feed": "iex", "sort": "asc"
+    }
     try:
-        for _ in range(10):
-            if token: p["page_token"] = token
-            r = requests.get(f"{DATA_URL}/v2/stocks/{symbol}/bars", headers=h, params=p, timeout=15)
-            if r.status_code != 200: return None
-            j = r.json(); bars += j.get("bars", []); token = j.get("next_page_token")
-            if not token: break
-        if not bars: return None
-        d = pd.DataFrame(bars)[["t","o","h","c","v"]]
-        d.columns = ["date","open","high","close","volume"]
-        d.date = pd.to_datetime(d.date, utc=True).dt.tz_convert("America/New_York").dt.normalize().dt.tz_localize(None)
+        bars, token = [], None
+        for _ in range(6):
+            if token:
+                params["page_token"] = token
+            r = requests.get(f"{DATA_URL}/v2/stocks/{symbol}/bars", headers=headers, params=params, timeout=12)
+            if r.status_code != 200:
+                return None
+            payload = r.json()
+            bars.extend(payload.get("bars", []))
+            token = payload.get("next_page_token")
+            if not token:
+                break
+        if not bars:
+            return None
+        d = pd.DataFrame(bars)[["t", "o", "h", "c", "v"]]
+        d.columns = ["date", "open", "high", "close", "volume"]
+        d["date"] = pd.to_datetime(d["date"], utc=True).dt.tz_convert("America/New_York").dt.normalize().dt.tz_localize(None)
         return d.set_index("date").sort_index().apply(pd.to_numeric, errors="coerce").dropna()
     except Exception:
         return None
 
 
-def load_all(start, end):
-    out = {}; prog = st.progress(0); msg = st.empty()
+def load_universe(symbols):
+    # Six workers avoids the request storm that caused Streamlit throttling.
+    result = {}
     with ThreadPoolExecutor(max_workers=6) as pool:
-        fs = {pool.submit(load_history, s, start, end): s for s in UNIVERSE}
-        for i, f in enumerate(as_completed(fs), 1):
-            d = f.result()
-            if d is not None and len(d) >= 180: out[fs[f]] = d
-            prog.progress(i / len(fs)); msg.write(f"Loading history {i}/{len(fs)}")
-    prog.empty(); msg.empty(); return out
+        futures = {pool.submit(load_history, s): s for s in symbols}
+        for future in as_completed(futures):
+            symbol = futures[future]
+            try:
+                data = future.result()
+                if data is not None and len(data) >= 120:
+                    result[symbol] = data
+            except Exception:
+                pass
+    return result
 
 
-@st.cache_data(ttl=21600, show_spinner=False)
-def prepare_history(df, lookback):
-    x = df.copy(); c = x.close.to_numpy(float); n = len(x); lb = int(lookback); states = np.full((n,4), np.nan)
-    for i in range(lb, n):
-        w = c[i-lb:i]; daily = np.diff(w) / w[:-1]
-        if len(w) < max(30, int(lb*.75)): continue
-        slope = np.polyfit(np.arange(len(w)), w, 1)[0] / max(w[-1], 1e-9)
-        states[i] = [w[-1]/w[0]-1, np.std(daily)*np.sqrt(252), w[-1]/np.max(w)-1, slope]
-    return x, states
+def fingerprint(df, end=None, lookback=63):
+    d = df if end is None else df.iloc[:end]
+    if len(d) < lookback + 25:
+        return None
+    c = d["close"]
+    window = c.tail(lookback)
+    daily = c.pct_change().dropna().tail(30)
+    recent_high = float(c.tail(60).max())
+    price = float(c.iloc[-1])
+    return {
+        "price": price,
+        "return_63": float(price / window.iloc[0] - 1),
+        "return_20": float(price / c.iloc[-21] - 1),
+        "return_5": float(price / c.iloc[-6] - 1),
+        "volatility": float(daily.std() * np.sqrt(252)),
+        "drawdown": float(price / recent_high - 1),
+        "sma20": float(c.tail(20).mean()),
+        "sma50": float(c.tail(50).mean()),
+    }
 
 
-def prediction(prep, as_of, analogues, target_pct):
-    df, states = prep; dates = df.index
-    pos = np.searchsorted(dates, pd.Timestamp(as_of), side="left") - 1
-    if pos < 1 or pos >= len(dates) or np.isnan(states[pos]).any(): return None
-    cur = states[pos]; valid = np.where(~np.isnan(states).any(axis=1))[0]; valid = valid[(valid+63) < len(df)]
-    if len(valid) < analogues: return None
-    scale = np.nanstd(states[valid], axis=0); scale[scale == 0] = 1
-    distances = np.linalg.norm((states[valid]-cur)/scale, axis=1); order = np.argsort(distances)[:int(analogues)]
-    pick = valid[order]; weights = 1/(distances[order]+.05); rets = []; days = []
-    for j, i in enumerate(pick):
-        start = float(df.close.iloc[i]); future = df.iloc[i:min(len(df), i+63)]
-        rets.append(float(future.close.iloc[-1]/start-1))
-        hits = np.where(future.high.to_numpy() >= start*(1+target_pct/100))[0]
-        if len(hits): days.append((hits[0]+1, weights[j]))
-    r = np.array(rets); w = np.array(weights)
-    pred = float(np.average(r, weights=w)); unc = float(np.average(np.abs(r-pred), weights=w)); posrate = float(np.average((r>0), weights=w))
-    hold = int(round(np.average([d[0] for d in days], weights=[d[1] for d in days]))) if days else 63
-    return pred, unc, len(pick), posrate, float(r.max()), float(r.min()), hold
+def historical_fingerprint_test(df, hold_days, buy_drop, sell_target):
+    """Walk historical pullback setups and measure how often the target was reached."""
+    if len(df) < 140:
+        return None
+    wins, returns, holds = [], [], []
+    start = 70
+    stop = len(df) - hold_days - 2
+    step = max(1, (stop - start) // 90)
+    for i in range(start, stop, step):
+        prior = df.iloc[max(0, i - 60):i]
+        if len(prior) < 20:
+            continue
+        entry_reference = float(prior["close"].max())
+        trigger = entry_reference * (1 - buy_drop / 100)
+        future = df.iloc[i:i + hold_days + 1]
+        entry_rows = np.where(future["low"].to_numpy(float) <= trigger)[0]
+        if len(entry_rows) == 0:
+            continue
+        e = int(entry_rows[0])
+        entry = trigger
+        after = future.iloc[e:e + hold_days + 1]
+        target = entry * (1 + sell_target / 100)
+        hits = np.where(after["high"].to_numpy(float) >= target)[0]
+        if len(hits):
+            h = int(hits[0])
+            returns.append(sell_target / 100)
+            wins.append(1)
+            holds.append(max(1, h))
+        else:
+            exit_price = float(after["close"].iloc[-1])
+            returns.append(exit_price / entry - 1)
+            wins.append(0)
+            holds.append(len(after) - 1)
+    if not returns:
+        return None
+    r = np.asarray(returns, dtype=float)
+    return {
+        "trades": len(r),
+        "win_rate": float(np.mean(wins)),
+        "median_return": float(np.median(r)),
+        "mean_return": float(np.mean(r)),
+        "hold": int(round(np.average(holds, weights=np.maximum(r + 0.05, 0.01)))),
+    }
 
 
-def quarter_windows(start, end):
-    s = pd.Timestamp(start).normalize(); e = pd.Timestamp(end).normalize(); q = []
-    while s < e:
-        qe = min(s + pd.DateOffset(months=3) - pd.Timedelta(days=1), e); q.append((s, qe)); s = qe + pd.Timedelta(days=1)
-    return q
+def score_stock(df, hold_days, buy_drop, sell_target):
+    f = fingerprint(df)
+    if not f:
+        return None
+    test = historical_fingerprint_test(df, hold_days, buy_drop, sell_target)
+    if not test or test["trades"] < 4:
+        return None
+    # Ranking favors repeatability and return, while penalizing large volatility.
+    trend_bonus = 0.10 if f["sma20"] > f["sma50"] else -0.10
+    score = test["median_return"] * 100 + test["win_rate"] * 20 + trend_bonus - f["volatility"] * 5
+    recent_high = float(df["close"].tail(60).max())
+    trigger = recent_high * (1 - buy_drop / 100)
+    return {
+        "Ticker": "",
+        "Score": float(score),
+        "Expected Return": test["median_return"],
+        "Win Rate": test["win_rate"],
+        "Historical Trades": test["trades"],
+        "Typical Hold": max(1, min(hold_days, test["hold"])),
+        "Price": f["price"],
+        "Buy Trigger": trigger,
+        "Sell Target": trigger * (1 + sell_target / 100),
+        "Momentum": f["return_20"],
+        "Volatility": f["volatility"],
+        "Fingerprint": f,
+    }
 
 
-def rank_current(histories, as_of, lookback, analogues, buy_drop, sell_target):
-    rows = []
-    for ticker, df in histories.items():
-        p = prediction(prepare_history(df, lookback), as_of, analogues, sell_target)
-        if not p: continue
-        pred, unc, n, pos, best, worst, hold = p; past = df[df.index <= pd.Timestamp(as_of)]; price = float(past.close.iloc[-1]); high = float(past.close.tail(60).max())
-        rows.append({"Ticker":ticker,"prediction":pred,"uncertainty":unc,"positive":pos,"best":best,"worst":worst,"hold":hold,"price":price,"buy_trigger":high*(1-buy_drop/100)})
-    return sorted(rows, key=lambda x:(x["prediction"],x["positive"],-x["uncertainty"]), reverse=True)[:10]
+def next_trading_date(days):
+    d = datetime.now().date()
+    count = 0
+    while count < int(days):
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            count += 1
+    return d.isoformat()
 
 
-def build_selections(histories, windows, lookback, analogues):
-    sel = {}
-    for qs, qe in windows:
-        ranked = []
-        for ticker, df in histories.items():
-            p = prediction(prepare_history(df, lookback), qs, analogues, 8)
-            if p: ranked.append((p[0], p[3], ticker))
-        ranked.sort(reverse=True); sel[str(qs.date())] = [{"Ticker":x[2]} for x in ranked[:15]]
-    return sel
-
-
-def simulate(df, start, end, capital, buy_drop, sell_target, allocation):
-    d = df[(df.index >= start) & (df.index <= end)]
-    if len(d) < 2: return capital
-    cash = float(capital); entry = qty = None; alloc = max(.01, min(1, float(allocation)/100))
-    for i in range(1, len(d)):
-        price = float(d.close.iloc[i]); high = float(d.high.iloc[i])
-        if qty is None:
-            prior = df[df.index < d.index[i]].tail(60)
-            if len(prior) < 20: continue
-            if price <= float(prior.close.max())*(1-buy_drop/100):
-                qty = int((cash*alloc)//price)
-                if qty: entry = price; cash -= qty*price
-        elif high >= entry*(1+sell_target/100):
-            cash += qty*entry*(1+sell_target/100); qty = None; entry = None
-    if qty: cash += qty*float(d.close.iloc[-1])
-    return cash
-
-
-def strategy(histories, windows, sel, capital, buy_drop, sell_target, top_n, allocation):
-    total = float(capital)
-    for qs, qe in windows:
-        picks = sel.get(str(qs.date()),[])[:int(top_n)]
-        if not picks: continue
-        per = total/max(1,int(top_n)); end = total
-        for item in picks: end += simulate(histories[item["Ticker"]], qs, qe, per, buy_drop, sell_target, allocation)-per
-        total = end
-    return {"Ending Capital":total,"Return %":(total-capital)/capital*100 if capital else 0}
-
-
-@st.cache_data(ttl=1800, show_spinner=False)
-def full_discovery_cached(_histories, window_keys, capital, history_signature):
-    histories = _histories; windows = [(pd.Timestamp(a),pd.Timestamp(b)) for a,b in window_keys]
-    base = build_selections(histories, windows, 63, 8); candidates = []
-    for b,s in itertools.product([5,10,15,20],[4,8,12,16]): candidates.append((strategy(histories,windows,base,capital,b,s,10,30)["Return %"],b,s))
-    _, bb, ss = max(candidates); fine = []
-    for b in range(max(1,bb-2), min(20,bb+2)+1):
-        for s in range(max(1,ss-2), min(20,ss+2)+1): fine.append((strategy(histories,windows,base,capital,b,s,10,30)["Return %"],b,s))
-    _, b, s = max(candidates+fine); _, n, a = max((strategy(histories,windows,base,capital,b,s,n,a)["Return %"],n,a) for n,a in itertools.product([5,10],[20,30,40])); best2 = []
-    for lb,an in [(63,8),(84,8),(63,12)]:
-        sel = build_selections(histories,windows,lb,an); best2.append((strategy(histories,windows,sel,capital,b,s,n,a)["Return %"],lb,an))
-    _, lb, an = max(best2); return b,s,n,a,lb,an
-
-
-def account():
+def paper_buy(symbol, notional):
+    if not PAPER_ONLY:
+        return False, "Live trading is disabled."
+    h = alpaca_headers()
+    if not h:
+        return False, "Alpaca PAPER credentials are unavailable."
+    body = {"symbol": symbol, "notional": f"{max(1.0, notional):.2f}", "side": "buy", "type": "market", "time_in_force": "day"}
     try:
-        r = requests.get(f"{TRADE_URL}/v2/account", headers=headers(), timeout=10); return r.json() if r.status_code == 200 else None
-    except Exception: return None
+        r = requests.post(f"{TRADE_URL}/v2/orders", headers={**h, "Content-Type": "application/json"}, json=body, timeout=15)
+        if r.status_code not in (200, 201):
+            return False, f"PAPER BUY rejected: {r.text[:250]}"
+        return True, f"PAPER BUY submitted for {symbol}."
+    except Exception as exc:
+        return False, f"PAPER BUY error: {exc}"
 
 
-def paper_buy(symbol, allocation, slots, target_pct):
-    h = headers(); ac = account()
-    if not h or not ac: return False,"Paper credentials/account unavailable.",None
+def paper_account():
+    h = alpaca_headers()
+    if not h:
+        return None
     try:
-        budget = float(ac.get("buying_power",0))*float(allocation)/100/max(1,int(slots))
-        if budget < 1: return False,"Paper buying power is too low.",None
-        body = {"symbol":symbol,"notional":f"{budget:.2f}","side":"buy","type":"market","time_in_force":"day","client_order_id":f"vast-{symbol.lower()}-{int(time.time()*1000)}"}
-        r = requests.post(f"{TRADE_URL}/v2/orders",headers={**h,"Content-Type":"application/json"},json=body,timeout=15)
-        if r.status_code not in (200,201): return False,f"BUY rejected: {r.text[:250]}",None
-        oid = r.json().get("id"); filled = None
-        for _ in range(6):
-            time.sleep(1); q = requests.get(f"{TRADE_URL}/v2/orders/{oid}",headers=h,timeout=8)
-            if q.status_code == 200:
-                filled = q.json()
-                if filled.get("status") in ("filled","partially_filled","canceled","rejected","expired"): break
-        if not filled or not filled.get("filled_avg_price"): return True,f"BUY submitted. Order {oid}",oid
-        fill = float(filled["filled_avg_price"]); qty = float(filled.get("filled_qty") or 0); target = round(fill*(1+target_pct/100),2)
-        if qty <= 0: return True,f"BUY filled at ${fill:.2f}; quantity pending.",oid
-        sb = {"symbol":symbol,"qty":str(qty).rstrip("0").rstrip("."),"side":"sell","type":"limit","time_in_force":"gtc","limit_price":f"{target:.2f}","client_order_id":f"vast-tp-{symbol.lower()}-{int(time.time()*1000)}"}
-        sr = requests.post(f"{TRADE_URL}/v2/orders",headers={**h,"Content-Type":"application/json"},json=sb,timeout=15)
-        if sr.status_code not in (200,201): return True,f"BUY filled @ ${fill:.2f}; target SELL failed: {sr.text[:200]}",oid
-        return True,f"PAPER BUY FILLED: {qty:g} {symbol} @ ${fill:.2f}. GTC target SELL ${target:.2f}.",{"buy":oid,"sell":sr.json().get("id")}
-    except Exception as e: return False,f"Paper execution error: {e}",None
+        r = requests.get(f"{TRADE_URL}/v2/account", headers=h, timeout=10)
+        return r.json() if r.status_code == 200 else None
+    except Exception:
+        return None
 
 
-def paper_sell(symbol):
-    h = headers()
-    if not h: return False,"Paper credentials unavailable.",None
-    try:
-        r = requests.get(f"{TRADE_URL}/v2/positions/{symbol}", headers=h, timeout=10)
-        if r.status_code != 200: return False,f"No open paper position for {symbol}.",None
-        p = r.json(); qty = float(p.get("qty",0))
-        if qty <= 0: return False,f"No open paper position for {symbol}.",None
-        body = {"symbol":symbol,"qty":str(qty).rstrip("0").rstrip("."),"side":"sell","type":"market","time_in_force":"day","client_order_id":f"vast-sell-{symbol.lower()}-{int(time.time()*1000)}"}
-        r = requests.post(f"{TRADE_URL}/v2/orders",headers={**h,"Content-Type":"application/json"},json=body,timeout=15)
-        if r.status_code not in (200,201): return False,f"SELL rejected: {r.text[:250]}",None
-        return True,f"PAPER SELL SUBMITTED: {symbol} {qty:g} shares.",r.json().get("id")
-    except Exception as e: return False,f"Paper SELL error: {e}",None
+# ---------------- UI ----------------
+st.title("⚒️ VAST CASH")
+st.subheader("STOCK TRADING FOR WELDERS")
+st.caption("MAXPROFIT does the math. You make the YES / NO decision. PAPER ONLY.")
 
+with st.sidebar:
+    st.header("🔧 MAXPROFIT SETTINGS")
+    hold_days = st.slider("Maximum hold (trading days)", 1, 30, 4)
+    buy_drop = st.slider("Buy % below recent high", 1, 20, 15)
+    sell_target = st.slider("Sell % above purchase", 1, 20, 8)
+    capital = st.number_input("Paper capital ($)", 100.0, 1000000.0, 1000.0, 100.0)
+    allocation = st.slider("Capital used for YES selections (%)", 5, 100, 50, 5)
+    st.divider()
+    st.caption("The engine searches historical setups. Results are evidence, not a guarantee of future returns.")
 
-st.title("💰 VAST CASH"); st.subheader("MAXPROFIT • TOP 10 DECISION ENGINE")
-st.write("Historical fingerprints → analogue prediction → Top 10 → make one decision on every stock → commit the complete board to PAPER.")
-capital = st.number_input("Simulation starting money",100.0,1000000.0,1000.0,100.0); test_days = st.number_input("Historical test length (days)",365,3650,730,30)
-c1,c2 = st.columns(2); quick = c1.button("⚡ FIND TOP 10 NOW",type="primary",width="stretch"); full = c2.button("⚔️ RUN FULL MAXPROFIT DISCOVERY",width="stretch")
+if "top10" not in st.session_state:
+    st.session_state.top10 = None
+if "decisions" not in st.session_state:
+    st.session_state.decisions = {}
+if "last_run" not in st.session_state:
+    st.session_state.last_run = None
 
-if quick or full:
-    if not headers(): st.error("Paper credentials are not available. Check Streamlit Secrets."); st.stop()
-    now = datetime.now(timezone.utc); end = now.date(); start = (now-timedelta(days=int(test_days)+1200)).date(); histories = load_all(start.isoformat(),end.isoformat())
-    if not histories: st.error("No usable market history returned."); st.stop()
-    lb,an,buy,sell,top,alloc = 63,8,15,8,10,30
-    if full:
-        windows = quarter_windows((now-timedelta(days=int(test_days))).date(),end); split = max(1,int(len(windows)*.7)); train = windows[:split]; validation = windows[split:]
-        keys = tuple((str(a.date()),str(b.date())) for a,b in train); signature = tuple((k,str(v.index.max()),len(v)) for k,v in sorted(histories.items()))
-        with st.spinner("⚔️ MAXPROFIT is running the reduced, cached discovery..."):
-            buy,sell,top,alloc,lb,an = full_discovery_cached(histories,keys,float(capital),signature)
-        st.success(f"BEST SETTINGS: BUY pullback {buy}% • SELL +{sell}% • Top {top} • allocation {alloc}% • lookback {lb} • analogues {an}")
-        val_sel = build_selections(histories,validation,lb,an); vr = strategy(histories,validation,val_sel,capital,buy,sell,top,alloc); st.metric("🧪 UNSEEN VALIDATION RETURN",f"{vr['Return %']:.2f}%")
-    asof = max(d.index.max() for d in histories.values()); ranked = rank_current(histories,asof,lb,an,buy,sell)
-    st.subheader("🔥 TOP 10 • YES / NO / BUY / SELL")
-    st.caption(f"Model date {asof.date()} • BUY trigger {buy}% pullback • target SELL +{sell}% from actual fill • PAPER ONLY")
-    if "decisions" not in st.session_state: st.session_state.decisions = {}
-    if "orders" not in st.session_state: st.session_state.orders = {}
-
-    for rank,row in enumerate(ranked,1):
-        ticker = row["Ticker"]; sell_date = (pd.Timestamp(asof)+pd.offsets.BDay(row["hold"])).date()
-        st.markdown(f"### #{rank}  {ticker}")
-        info = st.columns([1,1,1,1,1,1.25,1,1,1,1])
-        info[0].metric("Predicted",f"{row['prediction']*100:.1f}%")
-        info[1].metric("Price",f"${row['price']:.2f}")
-        info[2].metric("Buy Trigger",f"${row['buy_trigger']:.2f}")
-        info[3].metric("Hold",f"~{row['hold']}d")
-        info[4].metric("Positive",f"{row['positive']*100:.0f}%")
-        info[5].markdown(f"**Suggested sell:** {sell_date}")
-        options = ["YES","NO","BUY","SELL"]
-        current = st.session_state.decisions.get(ticker,"UNDECIDED")
-        b = info[6].button("YES", key=f"yes_{ticker}", type="primary" if current=="YES" else "secondary", width="stretch")
-        n = info[7].button("NO", key=f"no_{ticker}", type="primary" if current=="NO" else "secondary", width="stretch")
-        by = info[8].button("BUY", key=f"buy_{ticker}", type="primary" if current=="BUY" else "secondary", width="stretch")
-        se = info[9].button("SELL", key=f"sell_{ticker}", type="primary" if current=="SELL" else "secondary", width="stretch")
-        if b: st.session_state.decisions[ticker] = "YES"
-        elif n: st.session_state.decisions[ticker] = "NO"
-        elif by: st.session_state.decisions[ticker] = "BUY"
-        elif se: st.session_state.decisions[ticker] = "SELL"
-        decision = st.session_state.decisions.get(ticker,"UNDECIDED")
-        st.write(f"Current ${row['price']:.2f} | uncertainty ±{row['uncertainty']*100:.1f}% | best {row['best']*100:.1f}% | worst {row['worst']*100:.1f}% | **DECISION: {decision}**")
-        if ticker in st.session_state.orders:
-            z = st.session_state.orders[ticker]; (st.success if z[0] else st.error)(z[1])
-        st.divider()
-
-    chosen = [r["Ticker"] for r in ranked if st.session_state.decisions.get(r["Ticker"]) in {"YES","NO","BUY","SELL"}]
-    undecided = [r["Ticker"] for r in ranked if st.session_state.decisions.get(r["Ticker"]) not in {"YES","NO","BUY","SELL"}]
-    st.subheader("📋 COMMIT THE TOP 10 TO PAPER")
-    if undecided:
-        st.warning(f"Choose YES, NO, BUY, or SELL for every Top 10 stock before committing. Still undecided: {', '.join(undecided)}")
+run = st.button("⚡ RUN MAXPROFIT", type="primary", use_container_width=True)
+if run:
+    if not alpaca_headers():
+        st.error("Alpaca PAPER credentials are not available. Check Streamlit Secrets.")
     else:
-        st.success("All 10 decisions are made. Nothing has been sent yet. Review the board, then commit once.")
-        st.code(" | ".join(f"{r['Ticker']}={st.session_state.decisions[r['Ticker']]}" for r in ranked))
-        if st.button("🚀 COMMIT ALL 10 DECISIONS TO PAPER", type="primary", width="stretch"):
-            for r in ranked:
-                ticker = r["Ticker"]; decision = st.session_state.decisions[ticker]
-                if ticker in st.session_state.orders and st.session_state.orders[ticker][0]: continue
-                if decision == "NO":
-                    st.session_state.orders[ticker] = (True,"NO: no paper order sent.",None)
-                elif decision in {"YES","BUY"}:
-                    st.session_state.orders[ticker] = paper_buy(ticker,alloc,10,sell)
-                elif decision == "SELL":
-                    st.session_state.orders[ticker] = paper_sell(ticker)
-            st.rerun()
+        with st.spinner("MAXPROFIT is testing the market fingerprints..."):
+            histories = load_universe(UNIVERSE)
+            ranked = []
+            for ticker, df in histories.items():
+                result = score_stock(df, hold_days, buy_drop, sell_target)
+                if result:
+                    result["Ticker"] = ticker
+                    ranked.append(result)
+            ranked.sort(key=lambda x: (x["Expected Return"], x["Win Rate"], x["Score"]), reverse=True)
+            st.session_state.top10 = ranked[:10]
+            st.session_state.decisions = {x["Ticker"]: None for x in st.session_state.top10}
+            st.session_state.last_run = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-st.success("🔒 PAPER MODE LOCKED. Each Top 10 stock now has exactly four decisions: YES, NO, BUY, SELL. Make one decision on all 10, then use one COMMIT button. Nothing is sent to PAPER until that final commit. Live trading is disabled.")
+if st.session_state.top10:
+    top10 = st.session_state.top10
+    st.success(f"MAXPROFIT found the current Top {len(top10)} historical setups. Run: {st.session_state.last_run}")
+    st.header("🏆 TOP 10 — YOUR DECISION")
+    st.caption("Every stock starts as a BUY candidate. Mark YES or NO. No paper order is sent while you choose.")
+
+    for rank, item in enumerate(top10, 1):
+        ticker = item["Ticker"]
+        with st.container(border=True):
+            a,b,c,d = st.columns([0.6,1.2,1.5,1.5])
+            a.metric("#", rank)
+            b.metric("STOCK", ticker)
+            c.metric("Historical return", f"{item['Expected Return']:+.1%}")
+            d.metric("Win rate", f"{item['Win Rate']:.0%}")
+            sell_days = item["Typical Hold"]
+            st.write(f"**Hold:** {sell_days} trading days  •  **Suggested sell date:** {next_trading_date(sell_days)}  •  **Current:** ${item['Price']:.2f}")
+            st.write(f"**Buy trigger:** ${item['Buy Trigger']:.2f}  •  **Sell target:** ${item['Sell Target']:.2f}  •  **Historical tests:** {item['Historical Trades']}")
+            st.caption(f"Why it ranked: historical median return {item['Expected Return']:+.1%}, {item['Win Rate']:.0%} profitable setups, 20-day momentum {item['Momentum']:+.1%}, volatility {item['Volatility']:.1%}.")
+            left,right = st.columns(2)
+            if left.button("✅ YES", key=f"yes_{ticker}", use_container_width=True):
+                st.session_state.decisions[ticker] = "YES"
+            if right.button("❌ NO", key=f"no_{ticker}", use_container_width=True):
+                st.session_state.decisions[ticker] = "NO"
+            decision = st.session_state.decisions.get(ticker)
+            if decision == "YES":
+                st.success("YES selected")
+            elif decision == "NO":
+                st.info("NO selected")
+            else:
+                st.warning("Not decided")
+
+    decisions_complete = all(st.session_state.decisions.get(x["Ticker"]) in ("YES", "NO") for x in top10)
+    yes = [x for x in top10 if st.session_state.decisions.get(x["Ticker"]) == "YES"]
+    st.divider()
+    st.metric("YES selections", f"{len(yes)} / {len(top10)}")
+
+    if st.button("🚀 COMMIT SELECTED TO PAPER", type="primary", disabled=not decisions_complete, use_container_width=True):
+        if not yes:
+            st.info("All ten are NO. Nothing will be sent to Alpaca.")
+        else:
+            account = paper_account()
+            if not account:
+                st.error("Could not access the Alpaca PAPER account.")
+            else:
+                buying_power = float(account.get("buying_power", 0))
+                budget = buying_power * allocation / 100 / len(yes)
+                st.subheader("📨 PAPER ORDERS")
+                for item in yes:
+                    ok, message = paper_buy(item["Ticker"], budget)
+                    st.success(message) if ok else st.error(message)
+
+st.divider()
+st.caption("🔒 PAPER ONLY. There is no live-trading path in this build.")
