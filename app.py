@@ -3,7 +3,7 @@ from collections.abc import Mapping
 from datetime import datetime,timedelta,timezone
 import numpy as np,pandas as pd,requests,streamlit as st
 st.set_page_config(page_title='VAST CASH',page_icon='⚒️',layout='wide')
-PAPER_ONLY=True; DATA='https://data.alpaca.markets'; TRADE='https://paper-api.alpaca.markets'; TARGET=0.10
+PAPER_ONLY=True; DATA='https://data.alpaca.markets'; TRADE='https://paper-api.alpaca.markets'; TARGET=0.12
 UNIVERSE=['AAPL','MSFT','NVDA','AMZN','META','GOOGL','GOOG','AVGO','TSLA','AMD','NFLX','ORCL','CRM','ADBE','QCOM','INTC','MU','AMAT','LRCX','TXN','JPM','BAC','WFC','GS','MS','V','MA','C','JNJ','UNH','XOM','CVX','COST','WMT','HD','LOW','CAT','GE','BA','DIS']
 def secret(names):
     names={x.upper() for x in names}
@@ -47,7 +47,7 @@ def score(s,d,hold,buy_drop):
     for i in range(start,stop,step):
         prior=d.iloc[max(0,i-60):i];trigger=float(prior.high.max())*(1-buy_drop/100);fut=d.iloc[i:i+hold+1];hits=np.where(fut.low.to_numpy()<=trigger)[0]
         if not len(hits):continue
-        a=fut.iloc[int(hits[0]):int(hits[0])+hold+1];th=np.where(a.high.to_numpy()>=trigger*1.10)[0]
+        a=fut.iloc[int(hits[0]):int(hits[0])+hold+1];th=np.where(a.high.to_numpy()>=trigger*(1+TARGET))[0]
         if len(th):wins.append(1);rets.append(.10);hs.append(max(1,int(th[0])))
         else:wins.append(0);rets.append(float(a.close.iloc[-1]/trigger-1));hs.append(len(a)-1)
     if len(rets)<4:return None
@@ -82,13 +82,13 @@ def buy(symbol,budget,hold):
         if not fill:return True,f'PAPER BUY submitted for {symbol}; fill still pending.'
         target=round(fill*(1+TARGET),2)
         x=requests.post(f'{TRADE}/v2/orders',headers={**h,'Content-Type':'application/json'},json={'symbol':symbol,'qty':str(fq),'side':'sell','type':'limit','limit_price':f'{target:.2f}','time_in_force':'gtc'},timeout=15)
-        msg=f'PAPER BUY {symbol}: {fq} shares @ ${fill:.2f}. AUTO-SELL at +10% (${target:.2f}). Time exit: {nextday(hold)}.'
+        msg=f'PAPER BUY {symbol}: {fq} shares @ ${fill:.2f}. AUTO-SELL at +12% (${target:.2f}). Time exit: {nextday(hold)}.'
         return True,msg if x.status_code in (200,201) else msg+' WARNING: target order was not accepted.'
     except Exception as e:return False,f'PAPER trade error: {e}'
 st.title('⚒️ VAST CASH');st.subheader('STOCK TRADING FOR WELDERS');st.caption('MAXPROFIT does the math. You make YES / NO. PAPER ONLY.')
 with st.sidebar:
     hold=st.slider('Maximum hold (trading days)',1,30,4);buy_drop=st.slider('Buy % below recent high',1,20,15);capital=st.number_input('Paper capital ($)',100.,1000000.,1000.,100.);allocation=st.slider('Capital used for YES selections (%)',5,100,50,5)
-    st.caption('EXIT: first condition wins, +10% above actual filled purchase price or the suggested hold-date exit.')
+    st.caption('EXIT: first condition wins, +12% above the actual average filled purchase price or the suggested hold-date exit.')
 if 'top10' not in st.session_state:st.session_state.top10=None
 if 'decisions' not in st.session_state:st.session_state.decisions={}
 if st.button('⚡ RUN MAXPROFIT',type='primary',use_container_width=True):
@@ -107,7 +107,7 @@ if st.session_state.top10:
         with st.container(border=True):
             a,b,c,d=st.columns([.6,1.2,1.4,1.4]);a.metric('#',i);b.metric('STOCK',t);c.metric('Historical return',f"{x['Expected Return']:+.1%}");d.metric('Win rate',f"{x['Win Rate']:.0%}")
             st.write(f"**Hold:** {x['Typical Hold']} days • **Suggested sell date:** {nextday(x['Typical Hold'])} • **Current:** ${x['Price']:.2f}")
-            st.write(f"**Buy trigger:** ${x['Buy Trigger']:.2f} • **AUTO-SELL:** +10% above actual fill • **Tests:** {x['Historical Trades']}")
+            st.write(f"**Buy trigger:** ${x['Buy Trigger']:.2f} • **AUTO-SELL:** +12% above actual average fill • **Tests:** {x['Historical Trades']}")
             l,r=st.columns(2)
             if l.button('✅ YES',key=f'yes_{t}',use_container_width=True):st.session_state.decisions[t]='YES'
             if r.button('❌ NO',key=f'no_{t}',use_container_width=True):st.session_state.decisions[t]='NO'
@@ -124,4 +124,4 @@ if st.session_state.top10:
                 budget=float(ac.get('buying_power',0))*allocation/100/len(yes);st.subheader('📨 PAPER ORDERS')
                 for x in yes:
                     ok,msg=buy(x['Ticker'],budget,x['Typical Hold']);st.success(msg) if ok else st.error(msg)
-st.divider();st.caption('🔒 PAPER ONLY. +10% target is based on the actual paper fill. Live trading is disabled.')
+st.divider();st.caption('🔒 PAPER ONLY. +12% target is based on the actual average paper fill. Live trading is disabled.')
