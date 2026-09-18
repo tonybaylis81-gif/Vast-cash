@@ -86,7 +86,7 @@ def buy(symbol,budget,hold):
         return True,msg if x.status_code in (200,201) else msg+' WARNING: target order was not accepted.'
     except Exception as e:return False,f'PAPER trade error: {e}'
 st.title('⚒️ VAST CASH'); st.success('VAST CASH engine loaded successfully. PAPER ONLY.')
-;st.subheader('STOCK TRADING FOR WELDERS');st.caption('MAXPROFIT does the math. You make YES / NO. PAPER ONLY.')
+st.subheader('STOCK TRADING FOR WELDERS');st.caption('MAXPROFIT does the math. You make YES / NO. PAPER ONLY.')
 with st.sidebar:
     hold=st.slider('Maximum hold (trading days)',1,30,4);buy_drop=st.slider('Buy % below recent high',1,20,15);capital=st.number_input('Paper capital ($)',100.,1000000.,1000.,100.);allocation=st.slider('Capital used for YES selections (%)',5,100,50,5)
     st.caption('EXIT: hold until +15% above the actual average filled purchase price, then sell automatically.')
