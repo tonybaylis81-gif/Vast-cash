@@ -65,6 +65,32 @@ def account():
     try:
         r=requests.get(f'{TRADE}/v2/account',headers=h,timeout=10);return r.json() if r.status_code==200 else None
     except Exception:return None
+def reconcile_pending():
+    h=hdr()
+    if not h:return []
+    done=[]
+    pending=st.session_state.get('pending_orders',{})
+    for oid,symbol in list(pending.items()):
+        try:
+            z=requests.get(f'{TRADE}/v2/orders/{oid}',headers=h,timeout=10)
+            if z.status_code!=200:continue
+            o=z.json();status=o.get('status','');fill=float(o.get('filled_avg_price') or 0);fq=int(float(o.get('filled_qty') or 0))
+            if status in ('filled','partially_filled') and fill>0 and fq>0:
+                target=round(fill*(1+TARGET),2)
+                existing=requests.get(f'{TRADE}/v2/orders',headers=h,params={'status':'open','symbols':symbol,'limit':100},timeout=10)
+                has_sell=False
+                if existing.status_code==200:
+                    for so in existing.json():
+                        if so.get('side')=='sell' and so.get('symbol')==symbol:has_sell=True;break
+                if not has_sell:
+                    x=requests.post(f'{TRADE}/v2/orders',headers={**h,'Content-Type':'application/json'},json={'symbol':symbol,'qty':str(fq),'side':'sell','type':'limit','limit_price':f'{target:.2f}','time_in_force':'gtc'},timeout=15)
+                    if x.status_code not in (200,201):continue
+                done.append(f'{symbol}: filled {fq} @ ${fill:.2f}; +10% GTC sell at ${target:.2f} is active.')
+                del pending[oid]
+            elif status in ('canceled','expired','rejected','done_for_day'):del pending[oid]
+        except Exception:continue
+    return done
+
 def buy(symbol,budget):
     h=hdr()
     if not h:return False,'Alpaca PAPER credentials unavailable.'
@@ -81,24 +107,29 @@ def buy(symbol,budget):
         if not qty:return False,f'No usable price for {symbol}.'
         r=requests.post(f'{TRADE}/v2/orders',headers={**h,'Content-Type':'application/json'},json={'symbol':symbol,'qty':str(qty),'side':'buy','type':'market','time_in_force':'day'},timeout=15)
         if r.status_code not in (200,201):return False,f'PAPER BUY rejected: {r.text[:200]}'
-        oid=r.json()['id'];fill=0;fq=0
+        oid=r.json()['id'];st.session_state.setdefault('pending_orders',{})[oid]=symbol;fill=0;fq=0
         for _ in range(12):
             time.sleep(1);z=requests.get(f'{TRADE}/v2/orders/{oid}',headers=h,timeout=10)
             if z.status_code==200:
                 o=z.json();fill=float(o.get('filled_avg_price') or 0);fq=int(float(o.get('filled_qty') or 0))
                 if fill>0 and fq>0:break
-        if not fill:return True,f'PAPER BUY submitted for {symbol}; fill still pending. Alpaca is continuing to work the order.'
+        if not fill:return True,f'PAPER BUY submitted for {symbol}; fill still pending. VAST CASH will reconcile it automatically.'
         target=round(fill*(1+TARGET),2)
         x=requests.post(f'{TRADE}/v2/orders',headers={**h,'Content-Type':'application/json'},json={'symbol':symbol,'qty':str(fq),'side':'sell','type':'limit','limit_price':f'{target:.2f}','time_in_force':'gtc'},timeout=15)
         msg=f'PAPER BUY {symbol}: {fq} shares @ ${fill:.2f}. AUTO-SELL at +10% (${target:.2f}) until target is reached.'
         return True,msg if x.status_code in (200,201) else msg+' WARNING: target order was not accepted.'
     except Exception as e:return False,f'PAPER trade error: {e}'
-st.title('⚒️ VAST CASH');st.subheader('STOCK TRADING FOR WELDERS');st.caption('MAXPROFIT does the math. You make YES / NO. PAPER ONLY.')
+st.title('⚒️ VAST CASH');
+try:
+    reconciled=reconcile_pending()
+    for msg in reconciled:st.success('🔄 '+msg)
+except Exception:passst.subheader('STOCK TRADING FOR WELDERS');st.caption('MAXPROFIT does the math. You make YES / NO. PAPER ONLY.')
 with st.sidebar:
     buy_drop=st.slider('Buy % below recent high',1,20,15);capital=st.number_input('Paper capital ($)',100.,1000000.,1000.,100.);allocation=st.slider('Capital used for YES selections (%)',5,100,50,5)
     st.caption('EXIT: immediately place a GTC sell at +10% above the actual average filled purchase price.')
 if 'top10' not in st.session_state:st.session_state.top10=None
 if 'decisions' not in st.session_state:st.session_state.decisions={}
+if 'pending_orders' not in st.session_state:st.session_state.pending_orders={}
 if st.button('⚡ RUN MAXPROFIT',type='primary',use_container_width=True):
     if not hdr():
         st.error('Alpaca PAPER credentials are not available. Check Streamlit Secrets.')
