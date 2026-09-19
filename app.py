@@ -35,7 +35,7 @@ def all_hist():
         raw=r.json().get('bars',{}); out={}
         for s,b in raw.items():
             if not b:continue
-            d=pd.DataFrame(b)[['t','o','h','c']]; d.columns=['date','open','high','close']
+            d=pd.DataFrame(b)[['t','o','h','c']]; d.columns=['date','open','high','close']; d['low']=pd.DataFrame(b)['l'].to_numpy()
             d.date=pd.to_datetime(d.date,utc=True).dt.tz_convert('America/New_York').dt.normalize().dt.tz_localize(None)
             d=d.set_index('date').sort_index().apply(pd.to_numeric,errors='coerce').dropna()
             if len(d)>=140:out[s]=d
