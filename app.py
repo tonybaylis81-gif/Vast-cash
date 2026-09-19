@@ -147,5 +147,9 @@ if st.session_state.top10:
             else:
                 budget=float(ac.get('buying_power',0))*allocation/100/len(yes);st.subheader('📨 PAPER ORDERS')
                 for x in yes:
-                    ok,msg=buy(x['Ticker'],budget,x['Typical Hold']);st.success(msg) if ok else st.error(msg)
+                    ok,msg=buy(x['Ticker'],budget,x['Typical Hold'])
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
 st.divider();st.caption('🔒 PAPER ONLY. +15% target is based on the actual average paper fill. Live trading is disabled.')
