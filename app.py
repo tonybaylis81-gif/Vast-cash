@@ -41,9 +41,9 @@ def all_hist():
             if len(d)>=140:out[s]=d
         return out
     except Exception:return {}
-def score(s,d,hold,buy_drop):
+def score(s,d,buy_drop):
     if len(d)<140:return None
-    wins=[];rets=[];hs=[];start=70;stop=len(d)-hold-2;step=max(1,(stop-start)//90)
+    wins=[];rets=[];hs=[];start=70;stop=len(d)-2;step=max(1,(stop-start)//90)
     for i in range(start,stop,step):
         prior=d.iloc[max(0,i-60):i];trigger=float(prior['high'].max())*(1-buy_drop/100);fut=d.iloc[i:i+hold+1];hits=np.where(fut['low'].to_numpy()<=trigger)[0]
         if not len(hits):continue
@@ -51,7 +51,7 @@ def score(s,d,hold,buy_drop):
         if len(th):wins.append(1);rets.append(TARGET);hs.append(max(1,int(th[0])))
         else:wins.append(0);rets.append(float(a.close.iloc[-1]/trigger-1));hs.append(len(a)-1)
     if len(rets)<4:return None
-    c=d.close;price=float(c.iloc[-1]);recent=float(c.tail(60).max());trigger=recent*(1-buy_drop/100);win=float(np.mean(wins));ret=float(np.median(rets));vol=float(c.pct_change().dropna().tail(30).std()*np.sqrt(252));momentum=float(price/c.iloc[-21]-1);typical=max(1,min(hold,int(round(np.mean(hs)))))
+    c=d.close;price=float(c.iloc[-1]);recent=float(c.tail(60).max());trigger=recent*(1-buy_drop/100);win=float(np.mean(wins));ret=float(np.median(rets));vol=float(c.pct_change().dropna().tail(30).std()*np.sqrt(252));momentum=float(price/c.iloc[-21]-1);typical=max(1,int(round(np.mean(hs))))
     return {'Ticker':s,'Expected Return':ret,'Win Rate':win,'Historical Trades':len(rets),'Typical Hold':typical,'Price':price,'Buy Trigger':trigger,'Sell Target':trigger*(1+TARGET),'Momentum':momentum,'Volatility':vol,'Score':ret*100+win*20-vol*5}
 def nextday(n):
     d=datetime.now().date();c=0
@@ -65,7 +65,7 @@ def account():
     try:
         r=requests.get(f'{TRADE}/v2/account',headers=h,timeout=10);return r.json() if r.status_code==200 else None
     except Exception:return None
-def buy(symbol,budget,hold):
+def buy(symbol,budget):
     h=hdr()
     if not h:return False,'Alpaca PAPER credentials unavailable.'
     try:
@@ -95,8 +95,8 @@ def buy(symbol,budget,hold):
     except Exception as e:return False,f'PAPER trade error: {e}'
 st.title('⚒️ VAST CASH');st.subheader('STOCK TRADING FOR WELDERS');st.caption('MAXPROFIT does the math. You make YES / NO. PAPER ONLY.')
 with st.sidebar:
-    hold=st.slider('Maximum hold (trading days)',1,30,4);buy_drop=st.slider('Buy % below recent high',1,20,15);capital=st.number_input('Paper capital ($)',100.,1000000.,1000.,100.);allocation=st.slider('Capital used for YES selections (%)',5,100,50,5)
-    st.caption('EXIT: immediately place a GTC sell at +10% above the actual average filled purchase price. Hold setting is for MAXPROFIT testing only.')
+    buy_drop=st.slider('Buy % below recent high',1,20,15);capital=st.number_input('Paper capital ($)',100.,1000000.,1000.,100.);allocation=st.slider('Capital used for YES selections (%)',5,100,50,5)
+    st.caption('EXIT: immediately place a GTC sell at +10% above the actual average filled purchase price.')
 if 'top10' not in st.session_state:st.session_state.top10=None
 if 'decisions' not in st.session_state:st.session_state.decisions={}
 if st.button('⚡ RUN MAXPROFIT',type='primary',use_container_width=True):
@@ -120,7 +120,7 @@ if st.button('⚡ RUN MAXPROFIT',type='primary',use_container_width=True):
                 for i,(s,d) in enumerate(hist.items(),1):
                     runner.markdown(f'## 🏃‍♂️💨 **MAXPROFIT RUNNING**  ·  {s}  ·  {i}/{total}')
                     status.info(f'🔧 Testing {s}: historical buy triggers, +10% target hits, win rate and volatility...')
-                    x=score(s,d,hold,buy_drop)
+                    x=score(s,d,buy_drop)
                     if x:ranked.append(x)
                     progress.progress(i/total,text=f'Calculating MAXPROFIT: {i}/{total} stocks')
                 ranked.sort(key=lambda x:(x['Expected Return'],x['Win Rate'],x['Score']),reverse=True)
@@ -138,7 +138,7 @@ if st.session_state.top10:
         t=x['Ticker']
         with st.container(border=True):
             a,b,c,d=st.columns([.6,1.2,1.4,1.4]);a.metric('#',i);b.metric('STOCK',t);c.metric('Historical return',f"{x['Expected Return']:+.1%}");d.metric('Win rate',f"{x['Win Rate']:.0%}")
-            st.write(f"**Hold:** {x['Typical Hold']} days • **Suggested sell date:** {nextday(x['Typical Hold'])} • **Current:** ${x['Price']:.2f}")
+            st.write(f"**Typical historical target time:** {x['Typical Hold']} trading days • **Current:** ${x['Price']:.2f}")
             st.write(f"**Buy trigger:** ${x['Buy Trigger']:.2f} • **AUTO-SELL:** +10% above actual average fill • **Tests:** {x['Historical Trades']}")
             l,r=st.columns(2)
             if l.button('✅ YES',key=f'yes_{t}',use_container_width=True):st.session_state.decisions[t]='YES'
@@ -155,7 +155,7 @@ if st.session_state.top10:
             else:
                 budget=float(ac.get('buying_power',0))*allocation/100/len(yes);st.subheader('📨 PAPER ORDERS')
                 for x in yes:
-                    ok,msg=buy(x['Ticker'],budget,x['Typical Hold'])
+                    ok,msg=buy(x['Ticker'],budget)
                     if ok:
                         st.success(msg)
                     else:
