@@ -69,7 +69,15 @@ def buy(symbol,budget,hold):
     h=hdr()
     if not h:return False,'Alpaca PAPER credentials unavailable.'
     try:
-        q=requests.get(f'{DATA}/v2/stocks/{symbol}/quotes/latest',headers=h,timeout=10);ask=float(q.json()['quote']['ap']) if q.status_code==200 else 0;qty=max(1,int(budget/ask)) if ask>0 else 0
+        q=requests.get(f'{DATA}/v2/stocks/quotes/latest',headers=h,params={'symbols':symbol,'feed':'iex'},timeout=10);ask=0
+        if q.status_code==200:
+            quotes=q.json().get('quotes',{});quote=quotes.get(symbol,{})
+            ask=float(quote.get('ap') or 0);bid=float(quote.get('bp') or 0);ask=ask or bid
+        if ask<=0:
+            snap=requests.get(f'{DATA}/v2/stocks/{symbol}/snapshot',headers=h,params={'feed':'iex'},timeout=10)
+            if snap.status_code==200:
+                sd=snap.json();ask=float((sd.get('latestTrade') or {}).get('p') or (sd.get('dailyBar') or {}).get('c') or 0)
+        qty=max(1,int(budget/ask)) if ask>0 else 0
         if not qty:return False,f'No usable price for {symbol}.'
         r=requests.post(f'{TRADE}/v2/orders',headers={**h,'Content-Type':'application/json'},json={'symbol':symbol,'qty':str(qty),'side':'buy','type':'market','time_in_force':'day'},timeout=15)
         if r.status_code not in (200,201):return False,f'PAPER BUY rejected: {r.text[:200]}'
