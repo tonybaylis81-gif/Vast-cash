@@ -92,14 +92,38 @@ with st.sidebar:
 if 'top10' not in st.session_state:st.session_state.top10=None
 if 'decisions' not in st.session_state:st.session_state.decisions={}
 if st.button('⚡ RUN MAXPROFIT',type='primary',use_container_width=True):
-    if not hdr():st.error('Alpaca PAPER credentials are not available. Check Streamlit Secrets.')
+    if not hdr():
+        st.error('Alpaca PAPER credentials are not available. Check Streamlit Secrets.')
     else:
-        with st.spinner('MAXPROFIT is testing historical fingerprints...'):
-            ranked=[]
-            for s,d in all_hist().items():
-                x=score(s,d,hold,buy_drop)
-                if x:ranked.append(x)
-            ranked.sort(key=lambda x:(x['Expected Return'],x['Win Rate'],x['Score']),reverse=True);st.session_state.top10=ranked[:10];st.session_state.decisions={x['Ticker']:None for x in st.session_state.top10}
+        runner=st.empty()
+        status=st.empty()
+        progress=st.progress(0,text='MAXPROFIT is starting...')
+        try:
+            runner.markdown('## 🏃‍♂️💨 **MAXPROFIT RUNNING**')
+            status.info('🏃 Fetching historical market data from Alpaca PAPER...')
+            hist=all_hist()
+            if not hist:
+                progress.progress(0,text='MAXPROFIT stopped')
+                runner.markdown('## 🛑 **MAXPROFIT STOPPED**')
+                st.error('No historical market data was returned. Your PAPER credentials may be valid, but Alpaca data access returned no usable bars.')
+            else:
+                ranked=[]
+                total=len(hist)
+                for i,(s,d) in enumerate(hist.items(),1):
+                    runner.markdown(f'## 🏃‍♂️💨 **MAXPROFIT RUNNING**  ·  {s}  ·  {i}/{total}')
+                    status.info(f'🔧 Testing {s}: historical buy triggers, +15% target hits, win rate and volatility...')
+                    x=score(s,d,hold,buy_drop)
+                    if x:ranked.append(x)
+                    progress.progress(i/total,text=f'Calculating MAXPROFIT: {i}/{total} stocks')
+                ranked.sort(key=lambda x:(x['Expected Return'],x['Win Rate'],x['Score']),reverse=True)
+                st.session_state.top10=ranked[:10]
+                st.session_state.decisions={x['Ticker']:None for x in st.session_state.top10}
+                runner.markdown('## ✅ **MAXPROFIT COMPLETE**')
+                status.success(f'Finished testing {total} stocks. {len(ranked)} produced usable historical setups.')
+                progress.progress(1.0,text='MAXPROFIT calculation complete')
+        except Exception as e:
+            runner.markdown('## 🛑 **MAXPROFIT ERROR**')
+            st.error(f'MAXPROFIT encountered an error: {e}')
 if st.session_state.top10:
     top=st.session_state.top10;st.success(f'MAXPROFIT found Top {len(top)} historical setups.');st.header('🏆 TOP 10 — YOUR DECISION')
     for i,x in enumerate(top,1):
