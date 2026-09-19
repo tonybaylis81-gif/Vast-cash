@@ -3,7 +3,7 @@ from collections.abc import Mapping
 from datetime import datetime,timedelta,timezone
 import numpy as np,pandas as pd,requests,streamlit as st
 st.set_page_config(page_title='VAST CASH',page_icon='⚒️',layout='wide')
-PAPER_ONLY=True; DATA='https://data.alpaca.markets'; TRADE='https://paper-api.alpaca.markets'; TARGET=0.15
+PAPER_ONLY=True; DATA='https://data.alpaca.markets'; TRADE='https://paper-api.alpaca.markets'; TARGET=0.10
 UNIVERSE=['AAPL','MSFT','NVDA','AMZN','META','GOOGL','GOOG','AVGO','TSLA','AMD','NFLX','ORCL','CRM','ADBE','QCOM','INTC','MU','AMAT','LRCX','TXN','JPM','BAC','WFC','GS','MS','V','MA','C','JNJ','UNH','XOM','CVX','COST','WMT','HD','LOW','CAT','GE','BA','DIS']
 def secret(names):
     names={x.upper() for x in names}
@@ -90,13 +90,13 @@ def buy(symbol,budget,hold):
         if not fill:return True,f'PAPER BUY submitted for {symbol}; fill still pending.'
         target=round(fill*(1+TARGET),2)
         x=requests.post(f'{TRADE}/v2/orders',headers={**h,'Content-Type':'application/json'},json={'symbol':symbol,'qty':str(fq),'side':'sell','type':'limit','limit_price':f'{target:.2f}','time_in_force':'gtc'},timeout=15)
-        msg=f'PAPER BUY {symbol}: {fq} shares @ ${fill:.2f}. AUTO-SELL at +15% (${target:.2f}) until target is reached.'
+        msg=f'PAPER BUY {symbol}: {fq} shares @ ${fill:.2f}. AUTO-SELL at +10% (${target:.2f}) until target is reached.'
         return True,msg if x.status_code in (200,201) else msg+' WARNING: target order was not accepted.'
     except Exception as e:return False,f'PAPER trade error: {e}'
 st.title('⚒️ VAST CASH');st.subheader('STOCK TRADING FOR WELDERS');st.caption('MAXPROFIT does the math. You make YES / NO. PAPER ONLY.')
 with st.sidebar:
     hold=st.slider('Maximum hold (trading days)',1,30,4);buy_drop=st.slider('Buy % below recent high',1,20,15);capital=st.number_input('Paper capital ($)',100.,1000000.,1000.,100.);allocation=st.slider('Capital used for YES selections (%)',5,100,50,5)
-    st.caption('EXIT: hold until +15% above the actual average filled purchase price, then sell automatically.')
+    st.caption('EXIT: hold until +10% above the actual average filled purchase price, then sell automatically.')
 if 'top10' not in st.session_state:st.session_state.top10=None
 if 'decisions' not in st.session_state:st.session_state.decisions={}
 if st.button('⚡ RUN MAXPROFIT',type='primary',use_container_width=True):
@@ -119,7 +119,7 @@ if st.button('⚡ RUN MAXPROFIT',type='primary',use_container_width=True):
                 total=len(hist)
                 for i,(s,d) in enumerate(hist.items(),1):
                     runner.markdown(f'## 🏃‍♂️💨 **MAXPROFIT RUNNING**  ·  {s}  ·  {i}/{total}')
-                    status.info(f'🔧 Testing {s}: historical buy triggers, +15% target hits, win rate and volatility...')
+                    status.info(f'🔧 Testing {s}: historical buy triggers, +10% target hits, win rate and volatility...')
                     x=score(s,d,hold,buy_drop)
                     if x:ranked.append(x)
                     progress.progress(i/total,text=f'Calculating MAXPROFIT: {i}/{total} stocks')
@@ -139,7 +139,7 @@ if st.session_state.top10:
         with st.container(border=True):
             a,b,c,d=st.columns([.6,1.2,1.4,1.4]);a.metric('#',i);b.metric('STOCK',t);c.metric('Historical return',f"{x['Expected Return']:+.1%}");d.metric('Win rate',f"{x['Win Rate']:.0%}")
             st.write(f"**Hold:** {x['Typical Hold']} days • **Suggested sell date:** {nextday(x['Typical Hold'])} • **Current:** ${x['Price']:.2f}")
-            st.write(f"**Buy trigger:** ${x['Buy Trigger']:.2f} • **AUTO-SELL:** +15% above actual average fill • **Tests:** {x['Historical Trades']}")
+            st.write(f"**Buy trigger:** ${x['Buy Trigger']:.2f} • **AUTO-SELL:** +10% above actual average fill • **Tests:** {x['Historical Trades']}")
             l,r=st.columns(2)
             if l.button('✅ YES',key=f'yes_{t}',use_container_width=True):st.session_state.decisions[t]='YES'
             if r.button('❌ NO',key=f'no_{t}',use_container_width=True):st.session_state.decisions[t]='NO'
@@ -160,4 +160,4 @@ if st.session_state.top10:
                         st.success(msg)
                     else:
                         st.error(msg)
-st.divider();st.caption('🔒 PAPER ONLY. +15% target is based on the actual average paper fill. Live trading is disabled.')
+st.divider();st.caption('🔒 PAPER ONLY. +10% target is based on the actual average paper fill. Live trading is disabled.')
