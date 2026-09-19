@@ -96,7 +96,7 @@ def buy(symbol,budget,hold):
 st.title('⚒️ VAST CASH');st.subheader('STOCK TRADING FOR WELDERS');st.caption('MAXPROFIT does the math. You make YES / NO. PAPER ONLY.')
 with st.sidebar:
     hold=st.slider('Maximum hold (trading days)',1,30,4);buy_drop=st.slider('Buy % below recent high',1,20,15);capital=st.number_input('Paper capital ($)',100.,1000000.,1000.,100.);allocation=st.slider('Capital used for YES selections (%)',5,100,50,5)
-    st.caption('EXIT: hold until +10% above the actual average filled purchase price, then sell automatically.')
+    st.caption('EXIT: immediately place a GTC sell at +10% above the actual average filled purchase price. Hold setting is for MAXPROFIT testing only.')
 if 'top10' not in st.session_state:st.session_state.top10=None
 if 'decisions' not in st.session_state:st.session_state.decisions={}
 if st.button('⚡ RUN MAXPROFIT',type='primary',use_container_width=True):
