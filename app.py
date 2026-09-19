@@ -35,7 +35,7 @@ def all_hist():
         raw=r.json().get('bars',{}); out={}
         for s,b in raw.items():
             if not b:continue
-            d=pd.DataFrame(b)[['t','o','h','c']]; d.columns=['date','open','high','close']; d['low']=pd.DataFrame(b)['l'].to_numpy()
+            d=pd.DataFrame(b)[['t','o','h','c','l']]; d.columns=['date','open','high','close','low']
             d.date=pd.to_datetime(d.date,utc=True).dt.tz_convert('America/New_York').dt.normalize().dt.tz_localize(None)
             d=d.set_index('date').sort_index().apply(pd.to_numeric,errors='coerce').dropna()
             if len(d)>=140:out[s]=d
@@ -45,9 +45,9 @@ def score(s,d,hold,buy_drop):
     if len(d)<140:return None
     wins=[];rets=[];hs=[];start=70;stop=len(d)-hold-2;step=max(1,(stop-start)//90)
     for i in range(start,stop,step):
-        prior=d.iloc[max(0,i-60):i];trigger=float(prior.high.max())*(1-buy_drop/100);fut=d.iloc[i:i+hold+1];hits=np.where(fut.low.to_numpy()<=trigger)[0]
+        prior=d.iloc[max(0,i-60):i];trigger=float(prior['high'].max())*(1-buy_drop/100);fut=d.iloc[i:i+hold+1];hits=np.where(fut['low'].to_numpy()<=trigger)[0]
         if not len(hits):continue
-        a=fut.iloc[int(hits[0]):int(hits[0])+hold+1];th=np.where(a.high.to_numpy()>=trigger*(1+TARGET))[0]
+        a=fut.iloc[int(hits[0]):int(hits[0])+hold+1];th=np.where(a['high'].to_numpy()>=trigger*(1+TARGET))[0]
         if len(th):wins.append(1);rets.append(TARGET);hs.append(max(1,int(th[0])))
         else:wins.append(0);rets.append(float(a.close.iloc[-1]/trigger-1));hs.append(len(a)-1)
     if len(rets)<4:return None
