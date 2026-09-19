@@ -87,7 +87,7 @@ def buy(symbol,budget):
             if z.status_code==200:
                 o=z.json();fill=float(o.get('filled_avg_price') or 0);fq=int(float(o.get('filled_qty') or 0))
                 if fill>0 and fq>0:break
-        if not fill:return True,f'PAPER BUY submitted for {symbol}; fill still pending.'
+        if not fill:return True,f'PAPER BUY submitted for {symbol}; fill still pending. Alpaca is continuing to work the order.'
         target=round(fill*(1+TARGET),2)
         x=requests.post(f'{TRADE}/v2/orders',headers={**h,'Content-Type':'application/json'},json={'symbol':symbol,'qty':str(fq),'side':'sell','type':'limit','limit_price':f'{target:.2f}','time_in_force':'gtc'},timeout=15)
         msg=f'PAPER BUY {symbol}: {fq} shares @ ${fill:.2f}. AUTO-SELL at +10% (${target:.2f}) until target is reached.'
