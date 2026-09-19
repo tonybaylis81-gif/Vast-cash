@@ -45,7 +45,7 @@ def score(s,d,buy_drop):
     if len(d)<140:return None
     wins=[];rets=[];hs=[];start=70;stop=len(d)-2;step=max(1,(stop-start)//90)
     for i in range(start,stop,step):
-        prior=d.iloc[max(0,i-60):i];trigger=float(prior['high'].max())*(1-buy_drop/100);fut=d.iloc[i:i+hold+1];hits=np.where(fut['low'].to_numpy()<=trigger)[0]
+        prior=d.iloc[max(0,i-60):i];trigger=float(prior['high'].max())*(1-buy_drop/100);fut=d.iloc[i:i+31];hits=np.where(fut['low'].to_numpy()<=trigger)[0]
         if not len(hits):continue
         a=fut.iloc[int(hits[0]):int(hits[0])+31];th=np.where(a['high'].to_numpy()>=trigger*(1+TARGET))[0]
         if len(th):wins.append(1);rets.append(TARGET);hs.append(max(1,int(th[0])))
