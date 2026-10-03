@@ -26,21 +26,71 @@ def hdr():
 @st.cache_data(ttl=21600,show_spinner=False)
 def all_hist():
     h=hdr()
-    if not h:return {}
-    e=datetime.now(timezone.utc).date(); start=(e-timedelta(days=240)).isoformat()
-    params={'symbols':','.join(UNIVERSE),'timeframe':'1Day','start':start,'end':e.isoformat(),'limit':1000,'adjustment':'all','feed':'iex','sort':'asc'}
+    if not h:
+        return {}, 'Alpaca PAPER credentials are unavailable.'
+    # Use a completed market day as the end date. Alpaca's Basic market-data
+    # access can restrict very recent historical requests, so do not ask for
+    # today's still-forming bar.
+    end_date=(datetime.now(timezone.utc).date()-timedelta(days=1))
+    start_date=end_date-timedelta(days=240)
+    base_params={
+        'symbols':','.join(UNIVERSE),
+        'timeframe':'1Day',
+        'start':start_date.isoformat(),
+        'end':end_date.isoformat(),
+        'limit':10000,
+        'adjustment':'all',
+        'feed':'iex',
+        'sort':'asc'
+    }
     try:
-        r=requests.get(f'{DATA}/v2/stocks/bars',headers=h,params=params,timeout=25)
-        if r.status_code!=200:return {}
-        raw=r.json().get('bars',{}); out={}
-        for s,b in raw.items():
-            if not b:continue
-            d=pd.DataFrame(b)[['t','o','h','c','l']]; d.columns=['date','open','high','close','low']
+        all_raw={}
+        page_token=None
+        pages=0
+        while True:
+            params=dict(base_params)
+            if page_token:
+                params['page_token']=page_token
+            r=requests.get(f'{DATA}/v2/stocks/bars',headers=h,params=params,timeout=30)
+            if r.status_code!=200:
+                try:
+                    detail=r.json()
+                except Exception:
+                    detail=r.text[:500]
+                return {}, f'Alpaca market-data HTTP {r.status_code}: {detail}'
+            payload=r.json()
+            raw=payload.get('bars') or {}
+            for symbol,bars in raw.items():
+                if bars:
+                    all_raw.setdefault(symbol,[]).extend(bars)
+            pages+=1
+            page_token=payload.get('next_page_token')
+            if not page_token or pages>=20:
+                break
+
+        out={}
+        for s,b in all_raw.items():
+            if not b:
+                continue
+            d=pd.DataFrame(b)[['t','o','h','c','l']]
+            d.columns=['date','open','high','close','low']
             d.date=pd.to_datetime(d.date,utc=True).dt.tz_convert('America/New_York').dt.normalize().dt.tz_localize(None)
-            d=d.set_index('date').sort_index().apply(pd.to_numeric,errors='coerce').dropna()
-            if len(d)>=140:out[s]=d
-        return out
-    except Exception:return {}
+            d=d.drop_duplicates(subset=['date']).set_index('date').sort_index()
+            d=d.apply(pd.to_numeric,errors='coerce').dropna()
+            if len(d)>=140:
+                out[s]=d
+
+        if not out:
+            return {}, (
+                f'Alpaca returned HTTP 200 but no symbols had at least 140 usable daily bars '
+                f'for {start_date.isoformat()} through {end_date.isoformat()} using the IEX historical feed. '
+                f'Raw symbols returned: {list(all_raw)[:10]}.'
+            )
+        return out, f'Loaded {sum(len(v) for v in out.values())} daily bars across {len(out)} symbols.'
+    except requests.RequestException as e:
+        return {}, f'Network error while requesting Alpaca historical data: {e}'
+    except Exception as e:
+        return {}, f'Unexpected historical-data error: {e}'
 def score(s,d,buy_drop):
     if len(d)<140:return None
     wins=[];rets=[];hs=[];start=70;stop=len(d)-2;step=max(1,(stop-start)//90)
@@ -140,11 +190,13 @@ if st.button('⚡ RUN MAXPROFIT',type='primary',use_container_width=True):
         try:
             runner.markdown('## 🏃‍♂️💨 **MAXPROFIT RUNNING**')
             status.info('🏃 Fetching historical market data from Alpaca PAPER...')
-            hist=all_hist()
+            hist, hist_status=all_hist()
             if not hist:
                 progress.progress(0,text='MAXPROFIT stopped')
                 runner.markdown('## 🛑 **MAXPROFIT STOPPED**')
-                st.error('No historical market data was returned. Your PAPER credentials may be valid, but Alpaca data access returned no usable bars.')
+                st.error(f'No historical market data was returned. {hist_status}')
+                st.code(hist_status, language='text')
+                st.info('MAXPROFIT did not submit or modify any order. This is a market-data retrieval failure.')
             else:
                 ranked=[]
                 total=len(hist)
@@ -158,6 +210,7 @@ if st.button('⚡ RUN MAXPROFIT',type='primary',use_container_width=True):
                 st.session_state.top10=ranked[:10]
                 st.session_state.decisions={x['Ticker']:None for x in st.session_state.top10}
                 runner.markdown('## ✅ **MAXPROFIT COMPLETE**')
+                st.caption(f'📊 {hist_status}')
                 status.success(f'Finished testing {total} stocks. {len(ranked)} produced usable historical setups.')
                 progress.progress(1.0,text='MAXPROFIT calculation complete')
         except Exception as e:
