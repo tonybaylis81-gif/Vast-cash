@@ -21,8 +21,15 @@ def secret(names):
         x=os.getenv(n)
         if x and x.strip():return x.strip()
 def hdr():
-    k=secret(['PAPER_API_KEY','ALPACA_API_KEY','ALPACA_API_KEY_ID','API_KEY']); s=secret(['PAPER_API_SECRET','ALPACA_SECRET_KEY','ALPACA_API_SECRET','API_SECRET','SECRET_KEY'])
-    return {'APCA-API-KEY-ID':k,'APCA-API-SECRET-KEY':s} if k and s else None
+    # Prefer matched PAPER credentials. This avoids mixing unrelated key/secret pairs.
+    pairs=[('PAPER_API_KEY','PAPER_API_SECRET'),('ALPACA_API_KEY_ID','ALPACA_API_SECRET'),('ALPACA_API_KEY','ALPACA_SECRET_KEY')]
+    for key_name,secret_name in pairs:
+        k=secret([key_name])
+        s=secret([secret_name])
+        if k and s:
+            return {'APCA-API-KEY-ID':k,'APCA-API-SECRET-KEY':s}
+    return None
+
 @st.cache_data(ttl=21600,show_spinner=False)
 def all_hist():
     h=hdr()
