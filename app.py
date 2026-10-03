@@ -173,7 +173,10 @@ st.title('⚒️ VAST CASH');
 try:
     reconciled=reconcile_pending()
     for msg in reconciled:st.success('🔄 '+msg)
-except Exception:passst.subheader('STOCK TRADING FOR WELDERS');st.caption('MAXPROFIT does the math. You make YES / NO. PAPER ONLY.')
+except Exception:
+    pass
+st.subheader('STOCK TRADING FOR WELDERS')
+st.caption('MAXPROFIT does the math. You make YES / NO. PAPER ONLY.')
 with st.sidebar:
     buy_drop=st.slider('Buy % below recent high',1,20,15);capital=st.number_input('Paper capital ($)',100.,1000000.,1000.,100.);allocation=st.slider('Capital used for YES selections (%)',5,100,50,5)
     st.caption('EXIT: immediately place a GTC sell at +10% above the actual average filled purchase price.')
