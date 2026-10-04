@@ -111,39 +111,6 @@ def score(s,d,buy_drop):
     c=d.close;price=float(c.iloc[-1]);recent=float(c.tail(60).max());trigger=recent*(1-buy_drop/100);win=float(np.mean(wins));ret=float(np.median(rets));vol=float(c.pct_change().dropna().tail(30).std()*np.sqrt(252));momentum=float(price/c.iloc[-21]-1);typical=max(1,int(round(np.mean(hs))))
     return {'Ticker':s,'Expected Return':ret,'Win Rate':win,'Historical Trades':len(rets),'Typical Hold':typical,'Price':price,'Buy Trigger':trigger,'Sell Target':trigger*(1+TARGET),'Momentum':momentum,'Volatility':vol,'Score':ret*100+win*20-vol*5}
 def backtest_strategy(hist,buy_drop,starting_cash=SIMULATED_BUYING_POWER):
-    # Out-of-sample style walk-forward test: each entry uses only data available before that day.
-    cash=float(starting_cash); trades=[]; equity_curve=[]
-    for s,d in hist.items():
-        if len(d)<140: continue
-        for i in range(70,len(d)-31):
-            prior=d.iloc[max(0,i-60):i]
-            trigger=float(prior['high'].max())*(1-buy_drop/100)
-            fut=d.iloc[i:i+31]
-            hits=np.where(fut['low'].to_numpy()<=trigger)[0]
-            if not len(hits): continue
-            entry_i=int(hits[0]); entry=trigger
-            a=fut.iloc[entry_i:entry_i+31]
-            target=entry*(1+TARGET)
-            th=np.where(a['high'].to_numpy()>=target)[0]
-            if len(th):
-                exit_price=target; hold=max(1,int(th[0])); outcome='WIN'
-            else:
-                exit_price=float(a['close'].iloc[-1]); hold=max(1,len(a)-1); outcome='LOSS' if exit_price<entry else 'OPEN/FLAT'
-            ret=exit_price/entry-1
-            trades.append({'Ticker':s,'Entry':entry,'Exit':exit_price,'Return':ret,'Hold Days':hold,'Outcome':outcome})
-    if not trades: return pd.DataFrame(),{}
-    td=pd.DataFrame(trades).sort_values(['Ticker','Hold Days']).reset_index(drop=True)
-    # Equal-dollar test: every trade receives the same fraction of starting capital.
-    allocation=min(0.10,1/max(1,len(hist)))
-    equity=float(starting_cash); peak=equity; max_dd=0.0
-    for ret in td['Return']:
-        equity*=1+allocation*float(ret)
-        peak=max(peak,equity); max_dd=max(max_dd,(peak-equity)/peak if peak else 0)
-    wins=int((td['Return']>0).sum()); losses=int((td['Return']<=0).sum())
-    stats={'Starting Capital':starting_cash,'Ending Capital':equity,'Net Profit':equity-starting_cash,'Total Trades':len(td),'Wins':wins,'Losses':losses,'Win Rate':wins/len(td),'Max Drawdown':max_dd,'Avg Trade Return':float(td['Return'].mean()),'Median Trade Return':float(td['Return'].median()),'Best Trade':float(td['Return'].max()),'Worst Trade':float(td['Return'].min())}
-    return td,stats
-
-def backtest_strategy(hist,buy_drop,starting_cash=SIMULATED_BUYING_POWER):
     # Historical walk-forward test. Each entry uses only data available before that day.
     cash=float(starting_cash); trades=[]
     for s,d in hist.items():
@@ -347,8 +314,8 @@ if st.button('⚡ RUN MAXPROFIT',type='primary',use_container_width=True):
                     x=score(s,d,buy_drop)
                     if x:ranked.append(x)
                     progress.progress(i/total,text=f'Calculating MAXPROFIT: {i}/{total} stocks')
-                ranked.sort(key=lambda x:(x['Expected Return'],x['Win Rate'],x['Score']),reverse=True)
-                st.session_state.top10=ranked[:10]
+                # Rank by expected return, win rate, and risk-adjusted score. Keep the full trade plan with each pick.
+                ranked.sort(key=lambda x:(x['Score'],x['Expected Return'],x['Win Rate']),reverse=True)
                 st.session_state.decisions={x['Ticker']:None for x in st.session_state.top10}
                 runner.markdown('## ✅ **MAXPROFIT COMPLETE**')
                 st.caption(f'📊 {hist_status}')
@@ -357,6 +324,35 @@ if st.button('⚡ RUN MAXPROFIT',type='primary',use_container_width=True):
         except Exception as e:
             runner.markdown('## 🛑 **MAXPROFIT ERROR**')
             st.error(f'MAXPROFIT encountered an error: {e}')
+if st.session_state.top10:
+    st.header('🎯 TODAY’S TRADE PLAN')
+    st.caption('These are the ten highest-ranked setups from MAXPROFIT. The plan gives you the entry trigger, target, and historically typical time to target.')
+    plan=[]
+    for rank,x in enumerate(st.session_state.top10,1):
+        current=float(x['Price']); trigger=float(x['Buy Trigger']); target=float(x['Sell Target'])
+        action='BUY' if current<=trigger else 'WAIT'
+        plan.append({'#':rank,'STOCK':x['Ticker'],'ACTION':action,'CURRENT':current,'BUY AT':trigger,'SELL TARGET':target,'TYPICAL HOLD (TRADING DAYS)':x['Typical Hold'],'WIN RATE':x['Win Rate'],'HISTORICAL RETURN':x['Expected Return'],'TESTS':x['Historical Trades']})
+    st.dataframe(pd.DataFrame(plan).style.format({'CURRENT':'${:,.2f}','BUY AT':'${:,.2f}','SELL TARGET':'${:,.2f}','WIN RATE':'{:.0%}','HISTORICAL RETURN':'{:+.1%}'}),use_container_width=True,hide_index=True)
+    st.info('ACTION = BUY only when the current price is at or below the calculated buy trigger. Otherwise WAIT. SELL TARGET is +10% from the planned trigger. Actual execution price will determine the final target after a simulated or real fill.')
+    st.divider()
+    st.subheader('🧪 STRATEGY PROFITABILITY TEST')
+    if st.button('📈 TEST WHETHER VAST CASH MAKES MONEY',use_container_width=True):
+        hist,_=all_hist()
+        if hist:
+            with st.spinner('Running the historical strategy test...'):
+                trades,stats=backtest_strategy(hist,buy_drop,capital)
+            if stats:
+                a,b,c,d=st.columns(4)
+                a.metric('Starting',f"${stats['Starting Capital']:,.0f}")
+                b.metric('Ending',f"${stats['Ending Capital']:,.0f}")
+                c.metric('Net Profit',f"${stats['Net Profit']:,.0f}")
+                d.metric('Max Drawdown',f"{stats['Max Drawdown']:.1%}")
+                st.write(f"**Trades:** {stats['Total Trades']} • **Win rate:** {stats['Win Rate']:.1%} • **Average trade:** {stats['Avg Trade Return']:+.2%} • **Best:** {stats['Best Trade']:+.2%} • **Worst:** {stats['Worst Trade']:+.2%}")
+                st.caption('This is a historical simulation, not a promise of future returns. It does not include commissions, slippage, taxes, or market-impact effects.')
+                st.dataframe(trades,use_container_width=True,hide_index=True)
+            else: st.warning('No qualifying historical trades were found.')
+        else: st.error('Historical market data could not be loaded.')
+
 if st.session_state.top10:
     top=st.session_state.top10;st.success(f'MAXPROFIT found Top {len(top)} historical setups.');st.header('🏆 TOP 10 — YOUR DECISION')
     for i,x in enumerate(top,1):
