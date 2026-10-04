@@ -3,7 +3,7 @@ from collections.abc import Mapping
 from datetime import datetime,timedelta,timezone
 import numpy as np,pandas as pd,requests,streamlit as st
 st.set_page_config(page_title='VAST CASH',page_icon='⚒️',layout='wide')
-PAPER_ONLY=True; SIMULATED_BUYING_POWER=1000000.00; DATA='https://data.alpaca.markets'; TRADE='https://paper-api.alpaca.markets'; TARGET=0.10
+PAPER_ONLY=True; SIM_MODE=True; SIMULATED_BUYING_POWER=1000000.00; DATA='https://data.alpaca.markets'; TRADE='https://paper-api.alpaca.markets'; TARGET=0.10
 UNIVERSE=['AAPL','MSFT','NVDA','AMZN','META','GOOGL','GOOG','AVGO','TSLA','AMD','NFLX','ORCL','CRM','ADBE','QCOM','INTC','MU','AMAT','LRCX','TXN','JPM','BAC','WFC','GS','MS','V','MA','C','JNJ','UNH','XOM','CVX','COST','WMT','HD','LOW','CAT','GE','BA','DIS']
 def secret(names):
     names={x.upper() for x in names}
@@ -117,19 +117,19 @@ def nextday(n):
         if d.weekday()<5:c+=1
     return d.isoformat()
 def account():
+    if SIM_MODE:
+        if 'sim_cash' not in st.session_state:st.session_state.sim_cash=SIMULATED_BUYING_POWER
+        if 'sim_positions' not in st.session_state:st.session_state.sim_positions=[]
+        invested=sum(float(p.get('Cost',0) or 0) for p in st.session_state.sim_positions)
+        equity=float(st.session_state.sim_cash)+invested
+        return {'status':'SIMULATED','cash':str(st.session_state.sim_cash),'equity':str(equity),'buying_power':str(st.session_state.sim_cash),'portfolio_value':str(equity)}
     h=hdr()
     if not h:return None
     try:
         r=requests.get(f'{TRADE}/v2/account',headers=h,timeout=10)
         if r.status_code==200:return r.json()
     except Exception:pass
-    return {
-        'status':'SIMULATED',
-        'cash':str(SIMULATED_BUYING_POWER),
-        'equity':str(SIMULATED_BUYING_POWER),
-        'buying_power':str(SIMULATED_BUYING_POWER),
-        'portfolio_value':str(SIMULATED_BUYING_POWER)
-    }
+    return None
 
 def account_diagnostics():
     h=hdr()
@@ -148,6 +148,7 @@ def account_diagnostics():
     },'LOCAL VAST CASH SIMULATION'
 
 def reconcile_pending():
+    if SIM_MODE:return []
     h=hdr()
     if not h:return []
     done=[]
@@ -174,6 +175,32 @@ def reconcile_pending():
     return done
 
 def buy(symbol,budget):
+    if SIM_MODE:
+        h=hdr()
+        if not h:return False,'Alpaca market-data credentials unavailable.'
+        try:
+            q=requests.get(f'{DATA}/v2/stocks/quotes/latest',headers=h,params={'symbols':symbol,'feed':'iex'},timeout=10)
+            ask=0
+            if q.status_code==200:
+                quote=(q.json().get('quotes',{}) or {}).get(symbol,{})
+                ask=float(quote.get('ap') or 0) or float(quote.get('bp') or 0)
+            if ask<=0:
+                snap=requests.get(f'{DATA}/v2/stocks/{symbol}/snapshot',headers=h,params={'feed':'iex'},timeout=10)
+                if snap.status_code==200:
+                    sd=snap.json();ask=float((sd.get('latestTrade') or {}).get('p') or (sd.get('dailyBar') or {}).get('c') or 0)
+            if ask<=0:return False,f'No usable market price for {symbol}.'
+            cash=float(st.session_state.get('sim_cash',SIMULATED_BUYING_POWER))
+            qty=int(min(budget,cash)/ask)
+            if qty<1:return False,f'SIM BUY skipped for {symbol}: available simulated cash is ${cash:,.2f}.'.replace('$','\\$')
+            cost=round(qty*ask,2)
+            if cost>cash:return False,f'SIM BUY rejected for {symbol}: cost ${cost:,.2f} exceeds simulated cash ${cash:,.2f}.'.replace('$','\\$')
+            target=round(ask*(1+TARGET),2)
+            st.session_state.sim_cash=round(cash-cost,2)
+            positions=st.session_state.setdefault('sim_positions',[])
+            positions.append({'Ticker':symbol,'Quantity':qty,'Entry Price':round(ask,2),'Cost':cost,'Target Price':target,'Target Gain':f'+{TARGET:.0%}','Status':'OPEN'})
+            st.session_state.setdefault('sim_orders',[]).append({'Ticker':symbol,'Side':'BUY','Quantity':qty,'Fill Price':round(ask,2),'Cost':cost,'Target Price':target,'Status':'FILLED'})
+            return True,f'SIM BUY {symbol}: {qty} shares @ ${ask:.2f}. Simulated +10% target: ${target:.2f}. NO ALPACA ORDER SENT.'.replace('$','\\$')
+        except Exception as e:return False,f'SIM trade error: {e}'
     h=hdr()
     if not h:return False,'Alpaca PAPER credentials unavailable.'
     try:
@@ -227,10 +254,10 @@ except Exception:
 show_account_diagnostics()
 st.divider()
 st.subheader('STOCK TRADING FOR WELDERS')
-st.caption('MAXPROFIT does the math. You make YES / NO. PAPER ONLY.')
+st.caption('MAXPROFIT does the math. You make YES / NO. $1M LOCAL SIMULATION. NO ALPACA ORDERS.')
 with st.sidebar:
-    buy_drop=st.slider('Buy % below recent high',1,20,15);capital=st.number_input('Paper capital ($)',100.,1000000.,1000.,100.);allocation=st.slider('Capital used for YES selections (%)',5,100,50,5)
-    st.caption('EXIT: immediately place a GTC sell at +10% above the actual average filled purchase price.')
+    buy_drop=st.slider('Buy % below recent high',1,20,15);capital=st.number_input('Paper capital ($)',100.,1000000.,1000000.,100.);allocation=st.slider('Capital used for YES selections (%)',5,100,50,5)
+    st.caption('SIM EXIT: record a simulated +10% target above the simulated fill price. No Alpaca PAPER order is submitted.')
 if 'top10' not in st.session_state:st.session_state.top10=None
 if 'decisions' not in st.session_state:st.session_state.decisions={}
 if 'pending_orders' not in st.session_state:st.session_state.pending_orders={}
@@ -285,7 +312,7 @@ if st.session_state.top10:
             elif st.session_state.decisions.get(t)=='NO':st.info('NO selected')
             else:st.warning('Not decided')
     complete=all(st.session_state.decisions.get(x['Ticker']) in ('YES','NO') for x in top);yes=[x for x in top if st.session_state.decisions.get(x['Ticker'])=='YES'];st.metric('YES selections',f'{len(yes)} / {len(top)}')
-    if st.button('🚀 COMMIT SELECTED TO PAPER',type='primary',disabled=not complete,use_container_width=True):
+    if st.button('🚀 COMMIT SELECTED TO SIMULATION',type='primary',disabled=not complete,use_container_width=True):
         if not yes:st.info('All NO. Nothing sent.')
         else:
             ac=account()
@@ -297,4 +324,4 @@ if st.session_state.top10:
                     ok,msg=buy(x['Ticker'],budget)
                     if ok:st.success(msg)
                     else:st.error(msg)
-st.divider();st.caption('🔒 PAPER ONLY. +10% target is based on the actual average paper fill. Live trading is disabled.')
+st.divider();st.caption('🔒 LOCAL SIMULATION ONLY. Starting bankroll: $1,000,000. +10% target uses the simulated fill price. No Alpaca orders are submitted.')
