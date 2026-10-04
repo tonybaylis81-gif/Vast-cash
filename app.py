@@ -314,8 +314,9 @@ if st.button('⚡ RUN MAXPROFIT',type='primary',use_container_width=True):
                     x=score(s,d,buy_drop)
                     if x:ranked.append(x)
                     progress.progress(i/total,text=f'Calculating MAXPROFIT: {i}/{total} stocks')
-                # Rank by expected return, win rate, and risk-adjusted score. Keep the full trade plan with each pick.
+                # Rank by score, then expected return and win rate. Keep the full trade plan with each pick.
                 ranked.sort(key=lambda x:(x['Score'],x['Expected Return'],x['Win Rate']),reverse=True)
+                st.session_state.top10=ranked[:10]
                 st.session_state.decisions={x['Ticker']:None for x in st.session_state.top10}
                 runner.markdown('## ✅ **MAXPROFIT COMPLETE**')
                 st.caption(f'📊 {hist_status}')
