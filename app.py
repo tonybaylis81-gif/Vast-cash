@@ -201,6 +201,23 @@ def buy(symbol,budget):
         msg=f'PAPER BUY {symbol}: {fq} shares @ ${fill:.2f}. AUTO-SELL at +10% (${target:.2f}) until target is reached.'
         return True,msg if x.status_code in (200,201) else msg+' WARNING: target order was not accepted.'
     except Exception as e:return False,f'PAPER trade error: {e}'
+def show_account_diagnostics():
+    st.header('🧾 PAPER ACCOUNT DIAGNOSTICS')
+    st.caption('LOCAL SIMULATED PAPER MODE: $1,000,000 starting buying power.')
+    if 'sim_cash' not in st.session_state:st.session_state.sim_cash=SIMULATED_BUYING_POWER
+    if 'sim_positions' not in st.session_state:st.session_state.sim_positions=[]
+    invested=sum(float(p.get('market_value',0) or 0) for p in st.session_state.sim_positions)
+    equity=st.session_state.sim_cash+invested
+    cols=st.columns(4)
+    cols[0].metric('💵 Cash',f"${st.session_state.sim_cash:,.2f}")
+    cols[1].metric('💰 Equity',f"${equity:,.2f}")
+    cols[2].metric('🏦 Buying Power',f"${st.session_state.sim_cash:,.2f}")
+    cols[3].metric('📊 Portfolio Value',f"${equity:,.2f}")
+    st.success('ACCOUNT MODE: LOCAL VAST CASH SIMULATION')
+    if st.session_state.sim_positions:
+        st.subheader('📈 Simulated Positions')
+        st.dataframe(pd.DataFrame(st.session_state.sim_positions),use_container_width=True,hide_index=True)
+    else:st.info('No simulated positions yet.')
 st.title('⚒️ VAST CASH');
 try:
     reconciled=reconcile_pending()
