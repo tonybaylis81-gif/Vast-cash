@@ -143,6 +143,33 @@ def backtest_strategy(hist,buy_drop,starting_cash=SIMULATED_BUYING_POWER):
     stats={'Starting Capital':starting_cash,'Ending Capital':equity,'Net Profit':equity-starting_cash,'Total Trades':len(td),'Wins':wins,'Losses':losses,'Win Rate':wins/len(td),'Max Drawdown':max_dd,'Avg Trade Return':float(td['Return'].mean()),'Median Trade Return':float(td['Return'].median()),'Best Trade':float(td['Return'].max()),'Worst Trade':float(td['Return'].min())}
     return td,stats
 
+def backtest_strategy(hist,buy_drop,starting_cash=SIMULATED_BUYING_POWER):
+    # Historical walk-forward test. Each entry uses only data available before that day.
+    cash=float(starting_cash); trades=[]
+    for s,d in hist.items():
+        if len(d)<140: continue
+        for i in range(70,len(d)-31):
+            prior=d.iloc[max(0,i-60):i]
+            trigger=float(prior['high'].max())*(1-buy_drop/100)
+            fut=d.iloc[i:i+31]
+            hits=np.where(fut['low'].to_numpy()<=trigger)[0]
+            if not len(hits): continue
+            entry=trigger; entry_i=int(hits[0]); a=fut.iloc[entry_i:entry_i+31]
+            target=entry*(1+TARGET)
+            th=np.where(a['high'].to_numpy()>=target)[0]
+            if len(th): exit_price=target; hold=max(1,int(th[0])); outcome='WIN'
+            else: exit_price=float(a['close'].iloc[-1]); hold=max(1,len(a)-1); outcome='LOSS' if exit_price<entry else 'FLAT'
+            trades.append({'Ticker':s,'Entry':entry,'Exit':exit_price,'Return':exit_price/entry-1,'Hold Days':hold,'Outcome':outcome})
+    if not trades:return pd.DataFrame(),{}
+    td=pd.DataFrame(trades).sort_values(['Ticker','Hold Days']).reset_index(drop=True)
+    allocation=min(0.10,1/max(1,len(hist)))
+    equity=float(starting_cash);peak=equity;max_dd=0.0
+    for ret in td['Return']:
+        equity*=1+allocation*float(ret);peak=max(peak,equity);max_dd=max(max_dd,(peak-equity)/peak if peak else 0)
+    wins=int((td['Return']>0).sum());losses=int((td['Return']<=0).sum())
+    stats={'Starting Capital':starting_cash,'Ending Capital':equity,'Net Profit':equity-starting_cash,'Total Trades':len(td),'Wins':wins,'Losses':losses,'Win Rate':wins/len(td),'Max Drawdown':max_dd,'Avg Trade Return':float(td['Return'].mean()),'Median Trade Return':float(td['Return'].median()),'Best Trade':float(td['Return'].max()),'Worst Trade':float(td['Return'].min())}
+    return td,stats
+
 def nextday(n):
     d=datetime.now().date();c=0
     while c<n:
