@@ -3,7 +3,7 @@ from collections.abc import Mapping
 from datetime import datetime,timedelta,timezone
 import numpy as np,pandas as pd,requests,streamlit as st
 st.set_page_config(page_title='VAST CASH',page_icon='⚒️',layout='wide')
-PAPER_ONLY=True; SIM_MODE=False; SIMULATED_BUYING_POWER=5000.00; DATA='https://data.alpaca.markets'; TRADE='https://paper-api.alpaca.markets'; TARGET=0.10
+PAPER_ONLY=True; SIM_MODE=False; SIMULATED_BUYING_POWER=5000.00; DATA='https://data.alpaca.markets'; TRADE='https://paper-api.alpaca.markets'; TARGET=0.05; STOP_LOSS=0.03; MIN_WIN_RATE=0.60; MIN_HISTORICAL_TRADES=6
 UNIVERSE=['AAPL','MSFT','NVDA','AMZN','META','GOOGL','GOOG','AVGO','TSLA','AMD','NFLX','ORCL','CRM','ADBE','QCOM','INTC','MU','AMAT','LRCX','TXN','JPM','BAC','WFC','GS','MS','V','MA','C','JNJ','UNH','XOM','CVX','COST','WMT','HD','LOW','CAT','GE','BA','DIS']
 def secret(names):
     names={x.upper() for x in names}
@@ -108,8 +108,8 @@ def score(s,d,buy_drop):
         if len(th):wins.append(1);rets.append(TARGET);hs.append(max(1,int(th[0])))
         else:wins.append(0);rets.append(float(a.close.iloc[-1]/trigger-1));hs.append(len(a)-1)
     if len(rets)<4:return None
-    c=d.close;price=float(c.iloc[-1]);recent=float(c.tail(60).max());trigger=recent*(1-buy_drop/100);win=float(np.mean(wins));ret=float(np.median(rets));vol=float(c.pct_change().dropna().tail(30).std()*np.sqrt(252));momentum=float(price/c.iloc[-21]-1);typical=max(1,int(round(np.mean(hs))))
-    return {'Ticker':s,'Expected Return':ret,'Win Rate':win,'Historical Trades':len(rets),'Typical Hold':typical,'Price':price,'Buy Trigger':trigger,'Sell Target':trigger*(1+TARGET),'Momentum':momentum,'Volatility':vol,'Score':ret*100+win*20-vol*5}
+    c=d.close;price=float(c.iloc[-1]);recent=float(c.tail(60).max());trigger=recent*(1-buy_drop/100);win=float(np.mean(wins));ret=float(np.mean(rets));vol=float(c.pct_change().dropna().tail(30).std()*np.sqrt(252));momentum=float(price/c.iloc[-21]-1);typical=max(1,int(round(np.mean(hs))))
+    return {'Ticker':s,'Expected Return':ret,'Win Rate':win,'Historical Trades':len(rets),'Typical Hold':typical,'Price':price,'Buy Trigger':trigger,'Sell Target':trigger*(1+TARGET),'Stop Loss':trigger*(1-STOP_LOSS),'Momentum':momentum,'Volatility':vol,'Score':ret*100+win*20-vol*5}
 def backtest_strategy(hist,buy_drop,starting_cash=SIMULATED_BUYING_POWER):
     # Historical walk-forward test. Each entry uses only data available before that day.
     cash=float(starting_cash); trades=[]
@@ -254,8 +254,10 @@ def buy(symbol,budget,buy_trigger=None):
         qty=int((spendable*0.98)/ask)
         if qty<1:return False,f'PAPER BUY skipped for {symbol}: no whole share fits the safe budget of ${spendable:,.2f}.'.replace('$','\\$')
         if qty*ask>spendable:return False,'PAPER BUY blocked: estimated cost exceeds budget; no order submitted.'
-        r=requests.post(f'{TRADE}/v2/orders',headers={**h,'Content-Type':'application/json'},json={'symbol':symbol,'qty':str(qty),'side':'buy','type':'market','time_in_force':'day'},timeout=15)
-        if r.status_code not in (200,201):return False,f'PAPER BUY rejected: {r.text[:200]}'
+        target=round(ask*(1+TARGET),2);stop=round(ask*(1-STOP_LOSS),2)
+        payload={'symbol':symbol,'qty':str(qty),'side':'buy','type':'market','time_in_force':'day','order_class':'bracket','take_profit':{'limit_price':f'{target:.2f}'},'stop_loss':{'stop_price':f'{stop:.2f}'}}
+        r=requests.post(f'{TRADE}/v2/orders',headers={**h,'Content-Type':'application/json'},json=payload,timeout=15)
+        if r.status_code not in (200,201):return False,f'PAPER BRACKET BUY rejected: {r.text[:200]}'
         oid=r.json()['id'];st.session_state.setdefault('pending_orders',{})[oid]=symbol;fill=0;fq=0
         for _ in range(12):
             time.sleep(1);z=requests.get(f'{TRADE}/v2/orders/{oid}',headers=h,timeout=10)
@@ -265,8 +267,9 @@ def buy(symbol,budget,buy_trigger=None):
         if not fill:return True,f'PAPER BUY submitted for {symbol}; fill still pending. VAST CASH will reconcile it automatically.'
         target=round(fill*(1+TARGET),2)
         x=requests.post(f'{TRADE}/v2/orders',headers={**h,'Content-Type':'application/json'},json={'symbol':symbol,'qty':str(fq),'side':'sell','type':'limit','limit_price':f'{target:.2f}','time_in_force':'gtc'},timeout=15)
-        msg=f'PAPER BUY {symbol}: {fq} shares @ ${fill:.2f}. AUTO-SELL at +10% (${target:.2f}) until target is reached.'
-        return True,msg if x.status_code in (200,201) else msg+' WARNING: target order was not accepted.'
+        stop=round(fill*(1-STOP_LOSS),2)
+        msg=f'PAPER BRACKET BUY {symbol}: {fq} shares @ ${fill:.2f}. Take-profit ${target:.2f} (+{TARGET:.0%}); protective stop ${stop:.2f} (-{STOP_LOSS:.0%}) submitted as attached exits.'
+        return True,msg
     except Exception as e:return False,f'PAPER trade error: {e}'
 def show_positions_and_orders():
     h=hdr()
@@ -333,13 +336,13 @@ st.divider()
 st.subheader('STOCK TRADING FOR WELDERS')
 st.caption('MAXPROFIT ranks historical setups. YES / NO is your decision. Orders, if submitted, go to the ALPACA PAPER account only.')
 with st.sidebar:
-    buy_drop=st.slider('Buy % below recent high',1,20,15);capital=st.number_input('Backtest starting capital ($)',100.,1000000.,1000000.,100.);allocation=st.slider('Maximum available buying power allocated (%)',5,25,10,5)
-    auto_trade=st.checkbox('Enable automatic paper trading after MAXPROFIT runs',value=True,help='When enabled, MAXPROFIT submits paper buys only for current BUY signals. Account cash, buying power, price trigger, existing positions and open orders are checked first.')
-    st.caption('PAPER EXIT: after a paper buy fills, VAST CASH attempts a +10% limit sell. Paper orders only, no live-money orders.')
+    buy_drop=st.slider('Buy % below recent high',1,20,15);target_choice=st.selectbox('Profit target',options=[5,10],index=0,format_func=lambda v:f'+{v}%');TARGET=target_choice/100;capital=st.number_input('Backtest starting capital ($)',100.,1000000.,1000000.,100.);allocation=st.slider('Maximum available buying power allocated per run (%)',1,10,5,1)
+    auto_trade=st.checkbox('Enable automatic paper trading after daily scan',value=True,help='Paper trades only. Each qualifying buy requests a take-profit order and protective stop-loss. Stop prices do not guarantee the final selling price.')
+    st.caption(f'PAPER ONLY. Take-profit +{TARGET:.0%}; protective stop −{STOP_LOSS:.0%}. No live-money orders.')
 if 'top10' not in st.session_state:st.session_state.top10=None
 if 'decisions' not in st.session_state:st.session_state.decisions={}
 if 'pending_orders' not in st.session_state:st.session_state.pending_orders={}
-if st.button('⚡ RUN MAXPROFIT',type='primary',use_container_width=True):
+if st.button('🔎 WHAT ARE MY TEN BEST OPTIONS TODAY?',type='primary',use_container_width=True):
     if not hdr():
         st.error('Alpaca PAPER credentials are not available. Check Streamlit Secrets.')
     else:
@@ -361,21 +364,23 @@ if st.button('⚡ RUN MAXPROFIT',type='primary',use_container_width=True):
                 total=len(hist)
                 for i,(s,d) in enumerate(hist.items(),1):
                     runner.markdown(f'## 🏃‍♂️💨 **MAXPROFIT RUNNING**  ·  {s}  ·  {i}/{total}')
-                    status.info(f'🔧 Testing {s}: historical buy triggers, +10% target hits, win rate and volatility...')
+                    status.info(f'🔧 Testing {s}: historical +{TARGET:.0%} target hits, win rate and volatility...')
                     x=score(s,d,buy_drop)
                     if x:ranked.append(x)
                     progress.progress(i/total,text=f'Calculating MAXPROFIT: {i}/{total} stocks')
                 # Rank by score, then expected return and win rate. Keep the full trade plan with each pick.
-                ranked.sort(key=lambda x:(x['Score'],x['Expected Return'],x['Win Rate']),reverse=True)
-                st.session_state.top10=ranked[:10]
+                qualified=[x for x in ranked if x['Expected Return']>0 and x['Win Rate']>=MIN_WIN_RATE and x['Historical Trades']>=MIN_HISTORICAL_TRADES]
+                qualified.sort(key=lambda x:(x['Score'],x['Expected Return'],x['Win Rate']),reverse=True)
+                st.session_state.top10=qualified[:10]
                 st.session_state.decisions={x['Ticker']:None for x in st.session_state.top10}
                 runner.markdown('## ✅ **MAXPROFIT COMPLETE**')
                 st.caption(f'📊 {hist_status}')
-                status.success(f'Finished testing {total} stocks. {len(ranked)} produced usable historical setups.')
+                status.success(f'Checked {total} stocks. {len(qualified)} passed the filters: positive historical average return, at least {MIN_WIN_RATE:.0%} target-hit rate, and {MIN_HISTORICAL_TRADES}+ historical tests.')
+                if not qualified:st.warning('No stocks passed the filters today. The app will not force a trade just to fill ten slots.')
                 progress.progress(1.0,text='MAXPROFIT calculation complete')
                 if auto_trade:
                     candidates=[x for x in st.session_state.top10 if float(x.get('Price',0))<=float(x.get('Buy Trigger',0))]
-                    candidates=candidates[:3]
+                    candidates=candidates[:2]
                     if not candidates:st.info('AUTO-PAPER: no top-ranked stocks currently meet their buy trigger. No orders submitted.')
                     else:
                         ac=account()
@@ -399,9 +404,9 @@ if st.session_state.top10:
     for rank,x in enumerate(st.session_state.top10,1):
         current=float(x['Price']); trigger=float(x['Buy Trigger']); target=float(x['Sell Target'])
         action='BUY' if current<=trigger else 'WAIT'
-        plan.append({'#':rank,'STOCK':x['Ticker'],'ACTION':action,'CURRENT':current,'BUY AT':trigger,'SELL TARGET':target,'TYPICAL HOLD (TRADING DAYS)':x['Typical Hold'],'WIN RATE':x['Win Rate'],'HISTORICAL RETURN':x['Expected Return'],'TESTS':x['Historical Trades']})
-    st.dataframe(pd.DataFrame(plan).style.format({'CURRENT':'${:,.2f}','BUY AT':'${:,.2f}','SELL TARGET':'${:,.2f}','WIN RATE':'{:.0%}','HISTORICAL RETURN':'{:+.1%}'}),use_container_width=True,hide_index=True)
-    st.info('ACTION = BUY only when the current price is at or below the calculated buy trigger. Otherwise WAIT. SELL TARGET is +10% from the planned trigger. Actual execution price will determine the final target after a simulated or real fill.')
+        plan.append({'#':rank,'STOCK':x['Ticker'],'ACTION':action,'CURRENT':current,'BUY AT':trigger,'TAKE PROFIT':target,'STOP LOSS':x.get('Stop Loss',trigger*(1-STOP_LOSS)),'TYPICAL HOLD (TRADING DAYS)':x['Typical Hold'],'WIN RATE':x['Win Rate'],'HISTORICAL AVG RETURN':x['Expected Return'],'TESTS':x['Historical Trades']})
+    st.dataframe(pd.DataFrame(plan).style.format({'CURRENT':'${:,.2f}','BUY AT':'${:,.2f}','TAKE PROFIT':'${:,.2f}','STOP LOSS':'${:,.2f}','WIN RATE':'{:.0%}','HISTORICAL AVG RETURN':'{:+.1%}'}),use_container_width=True,hide_index=True)
+    st.info(f'ACTION = BUY only when the current price is at or below the entry trigger. Each paper buy requests a +{TARGET:.0%} take-profit and a −{STOP_LOSS:.0%} stop-loss. Stop orders cannot guarantee the final exit price.')
     st.divider()
     st.subheader('🧪 STRATEGY PROFITABILITY TEST')
     if st.button('📈 TEST WHETHER VAST CASH MAKES MONEY',use_container_width=True):
@@ -428,7 +433,7 @@ if st.session_state.top10:
         with st.container(border=True):
             a,b,c,d=st.columns([.6,1.2,1.4,1.4]);a.metric('#',i);b.metric('STOCK',t);c.metric('Historical return',f"{x['Expected Return']:+.1%}");d.metric('Win rate',f"{x['Win Rate']:.0%}")
             st.write(f"**Typical historical target time:** {x['Typical Hold']} trading days • **Current:** ${x['Price']:.2f}")
-            st.write(f"**Buy trigger:** ${x['Buy Trigger']:.2f} • **AUTO-SELL:** +10% above actual average fill • **Tests:** {x['Historical Trades']}")
+            st.write(f"**Buy trigger:** ${x['Buy Trigger']:.2f} • **Take profit:** +{TARGET:.0%} • **Protective stop:** −{STOP_LOSS:.0%} • **Tests:** {x['Historical Trades']}")
             l,r=st.columns(2)
             if l.button('✅ YES',key=f'yes_{t}',use_container_width=True):st.session_state.decisions[t]='YES'
             if r.button('❌ NO',key=f'no_{t}',use_container_width=True):st.session_state.decisions[t]='NO'
