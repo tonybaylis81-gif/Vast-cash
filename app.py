@@ -195,7 +195,7 @@ def reconcile_pending():
         except Exception:continue
     return done
 
-def buy(symbol,budget):
+def buy(symbol,budget,buy_trigger=None):
     if SIM_MODE:
         h=hdr()
         if not h:return False,'Alpaca market-data credentials unavailable.'
@@ -225,6 +225,14 @@ def buy(symbol,budget):
     h=hdr()
     if not h:return False,'Alpaca PAPER credentials unavailable.'
     try:
+        a=requests.get(f'{TRADE}/v2/account',headers=h,timeout=10)
+        if a.status_code!=200:return False,f'PAPER BUY blocked: account check failed (HTTP {a.status_code}); no order submitted.'
+        ac=a.json()
+        cash=float(ac.get('cash',0) or 0)
+        buying_power=float(ac.get('buying_power',0) or 0)
+        if cash<=0 or buying_power<=0:
+            return False,f'PAPER BUY blocked for {symbol}: cash ${cash:,.2f}, buying power ${buying_power:,.2f}. No order submitted.'.replace('$','\\$')
+        spendable=min(float(budget),cash,buying_power)
         q=requests.get(f'{DATA}/v2/stocks/quotes/latest',headers=h,params={'symbols':symbol,'feed':'iex'},timeout=10);ask=0
         if q.status_code==200:
             quotes=q.json().get('quotes',{});quote=quotes.get(symbol,{})
@@ -233,8 +241,12 @@ def buy(symbol,budget):
             snap=requests.get(f'{DATA}/v2/stocks/{symbol}/snapshot',headers=h,params={'feed':'iex'},timeout=10)
             if snap.status_code==200:
                 sd=snap.json();ask=float((sd.get('latestTrade') or {}).get('p') or (sd.get('dailyBar') or {}).get('c') or 0)
-        qty=max(1,int(budget/ask)) if ask>0 else 0
-        if not qty:return False,f'No usable price for {symbol}.'
+        if ask<=0:return False,f'No usable price for {symbol}; no order submitted.'
+        if buy_trigger is not None and ask>float(buy_trigger):
+            return False,f'PAPER BUY skipped for {symbol}: current ask ${ask:.2f} is above buy trigger ${float(buy_trigger):.2f}.'.replace('$','\\$')
+        qty=int((spendable*0.98)/ask)
+        if qty<1:return False,f'PAPER BUY skipped for {symbol}: no whole share fits the safe budget of ${spendable:,.2f}.'.replace('$','\\$')
+        if qty*ask>spendable:return False,'PAPER BUY blocked: estimated cost exceeds budget; no order submitted.'
         r=requests.post(f'{TRADE}/v2/orders',headers={**h,'Content-Type':'application/json'},json={'symbol':symbol,'qty':str(qty),'side':'buy','type':'market','time_in_force':'day'},timeout=15)
         if r.status_code not in (200,201):return False,f'PAPER BUY rejected: {r.text[:200]}'
         oid=r.json()['id'];st.session_state.setdefault('pending_orders',{})[oid]=symbol;fill=0;fq=0
@@ -273,10 +285,10 @@ except Exception:
 show_account_diagnostics()
 st.divider()
 st.subheader('STOCK TRADING FOR WELDERS')
-st.caption('MAXPROFIT does the math. You make YES / NO. $1M LOCAL SIMULATION. NO ALPACA ORDERS.')
+st.caption('MAXPROFIT ranks historical setups. YES / NO is your decision. Orders, if submitted, go to the ALPACA PAPER account only.')
 with st.sidebar:
-    buy_drop=st.slider('Buy % below recent high',1,20,15);capital=st.number_input('Paper capital ($)',100.,1000000.,1000000.,100.);allocation=st.slider('Capital used for YES selections (%)',5,100,50,5)
-    st.caption('SIM EXIT: record a simulated +10% target above the simulated fill price. No Alpaca PAPER order is submitted.')
+    buy_drop=st.slider('Buy % below recent high',1,20,15);capital=st.number_input('Backtest starting capital ($)',100.,1000000.,1000000.,100.);allocation=st.slider('Maximum available buying power allocated (%)',5,100,50,5)
+    st.caption('PAPER EXIT: after a paper buy fills, VAST CASH attempts a +10% limit sell. Paper orders only, no live-money orders.')
 if 'top10' not in st.session_state:st.session_state.top10=None
 if 'decisions' not in st.session_state:st.session_state.decisions={}
 if 'pending_orders' not in st.session_state:st.session_state.pending_orders={}
@@ -361,16 +373,19 @@ if st.session_state.top10:
             elif st.session_state.decisions.get(t)=='NO':st.info('NO selected')
             else:st.warning('Not decided')
     complete=all(st.session_state.decisions.get(x['Ticker']) in ('YES','NO') for x in top);yes=[x for x in top if st.session_state.decisions.get(x['Ticker'])=='YES'];st.metric('YES selections',f'{len(yes)} / {len(top)}')
-    if st.button('🚀 COMMIT SELECTED TO SIMULATION',type='primary',disabled=not complete,use_container_width=True):
+    if st.button('🚀 SUBMIT SELECTED TO ALPACA PAPER',type='primary',disabled=not complete,use_container_width=True):
         if not yes:st.info('All NO. Nothing sent.')
         else:
             ac=account()
             if not ac:st.error('Could not access Alpaca PAPER account.')
             else:
-                buying_power=float(ac.get('buying_power',0) or 0)
-                budget=buying_power*allocation/100/len(yes);st.subheader('📨 PAPER ORDERS')
-                for x in yes:
-                    ok,msg=buy(x['Ticker'],budget)
-                    if ok:st.success(msg)
-                    else:st.error(msg)
-st.divider();st.caption('🔒 LOCAL SIMULATION ONLY. Starting bankroll: $1,000,000. +10% target uses the simulated fill price. No Alpaca orders are submitted.')
+                cash=float(ac.get('cash',0) or 0);buying_power=float(ac.get('buying_power',0) or 0)
+                spendable=min(max(0,cash),max(0,buying_power))
+                if spendable<=0:st.error(f'NO ORDERS SENT. Paper account cash is ${cash:,.2f} and buying power is ${buying_power:,.2f}. Both must be positive.')
+                else:
+                    budget=spendable*allocation/100/len(yes);st.subheader('📨 ALPACA PAPER ORDERS')
+                    for x in yes:
+                        ok,msg=buy(x['Ticker'],budget,x.get('Buy Trigger'))
+                        if ok:st.success(msg)
+                        else:st.error(msg)
+st.divider();st.caption('🔒 ALPACA PAPER TRADING ONLY. Paper orders may be submitted to Alpaca; no live-money orders are sent. Historical backtests are separate simulations.')
