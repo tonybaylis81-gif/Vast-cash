@@ -335,11 +335,11 @@ try:
 except Exception:
     pass
 show_account_diagnostics()
-with st.expander('🔎 Inspect positions, open orders and recent order history',expanded=True):
+with st.expander('🔎 Account details (optional)',expanded=False):
     show_positions_and_orders()
 st.divider()
 st.subheader('STOCK TRADING FOR WELDERS')
-st.caption('MAXPROFIT ranks historical setups. YES / NO is your decision. Orders, if submitted, go to the ALPACA PAPER account only.')
+st.caption('One choice at a time. Press YES to submit a paper trade if the checks pass, or NO to skip it.')
 with st.sidebar:
     buy_drop=st.slider('Buy % below recent high',1,20,15);target_choice=st.selectbox('Profit target',options=[5,10],index=0,format_func=lambda v:f'+{v}%');TARGET=target_choice/100;capital=st.number_input('Backtest starting capital ($)',100.,1000000.,1000000.,100.);allocation=st.slider('Account balance to risk per approved trade (%)',1,5,2,1)
     st.caption(f'PAPER ONLY. Take-profit +{TARGET:.0%}; protective stop −{STOP_LOSS:.0%}. You approve each trade with YES. NO skips it.')
