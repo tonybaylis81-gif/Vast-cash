@@ -359,7 +359,7 @@ st.divider()
 st.subheader('STOCK TRADING FOR WELDERS')
 st.caption('One choice at a time. Press YES to submit a paper trade if the checks pass, or NO to skip it.')
 with st.sidebar:
-    buy_drop=st.slider('Buy % below recent high',1,20,15);target_choice=st.selectbox('Profit target',options=[5,10],index=0,format_func=lambda v:f'+{v}%');TARGET=target_choice/100;capital=st.number_input('Backtest starting capital ($)',100.,1000000.,1000000.,100.);allocation=st.slider('Account balance to risk per approved trade (%)',1,5,2,1)
+    buy_drop=st.slider('Buy % below 20-day average',1,10,5);target_choice=st.selectbox('Profit target',options=[5,10],index=0,format_func=lambda v:f'+{v}%');TARGET=target_choice/100;capital=st.number_input('Backtest starting capital ($)',100.,1000000.,1000000.,100.);allocation=st.slider('Account balance to risk per approved trade (%)',1,5,2,1)
     st.caption(f'PAPER ONLY. Take-profit +{TARGET:.0%}; protective stop −{STOP_LOSS:.0%}. You approve each trade with YES. NO skips it.')
 if 'top10' not in st.session_state:st.session_state.top10=None
 if 'decisions' not in st.session_state:st.session_state.decisions={}
