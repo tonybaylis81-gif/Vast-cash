@@ -266,7 +266,6 @@ def buy(symbol,budget,buy_trigger=None):
                 if fill>0 and fq>0:break
         if not fill:return True,f'PAPER BUY submitted for {symbol}; fill still pending. VAST CASH will reconcile it automatically.'
         target=round(fill*(1+TARGET),2)
-        x=requests.post(f'{TRADE}/v2/orders',headers={**h,'Content-Type':'application/json'},json={'symbol':symbol,'qty':str(fq),'side':'sell','type':'limit','limit_price':f'{target:.2f}','time_in_force':'gtc'},timeout=15)
         stop=round(fill*(1-STOP_LOSS),2)
         msg=f'PAPER BRACKET BUY {symbol}: {fq} shares @ ${fill:.2f}. Take-profit ${target:.2f} (+{TARGET:.0%}); protective stop ${stop:.2f} (-{STOP_LOSS:.0%}) submitted as attached exits.'
         return True,msg
