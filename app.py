@@ -3,7 +3,7 @@ from collections.abc import Mapping
 from datetime import datetime,timedelta,timezone
 import numpy as np,pandas as pd,requests,streamlit as st
 st.set_page_config(page_title='VAST CASH',page_icon='⚒️',layout='wide')
-PAPER_ONLY=True; SIM_MODE=True; SIMULATED_BUYING_POWER=1000000.00; DATA='https://data.alpaca.markets'; TRADE='https://paper-api.alpaca.markets'; TARGET=0.10
+PAPER_ONLY=True; SIM_MODE=False; SIMULATED_BUYING_POWER=5000.00; DATA='https://data.alpaca.markets'; TRADE='https://paper-api.alpaca.markets'; TARGET=0.10
 UNIVERSE=['AAPL','MSFT','NVDA','AMZN','META','GOOGL','GOOG','AVGO','TSLA','AMD','NFLX','ORCL','CRM','ADBE','QCOM','INTC','MU','AMAT','LRCX','TXN','JPM','BAC','WFC','GS','MS','V','MA','C','JNJ','UNH','XOM','CVX','COST','WMT','HD','LOW','CAT','GE','BA','DIS']
 def secret(names):
     names={x.upper() for x in names}
@@ -158,23 +158,17 @@ def account():
     except Exception:pass
     return None
 
-def account_diagnostics():
+dedef account_diagnostics():
     h=hdr()
-    if not h:return None,'Alpaca PAPER credentials unavailable.'
+    if not h:return None,'Alpaca PAPER credentials unavailable. No real account balance is available.'
     try:
         r=requests.get(f'{TRADE}/v2/account',headers=h,timeout=10)
         if r.status_code==200:
-            return r.json(),'LIVE ALPACA PAPER ACCOUNT'
-    except Exception:pass
-    return {
-        'status':'SIMULATED',
-        'cash':str(SIMULATED_BUYING_POWER),
-        'equity':str(SIMULATED_BUYING_POWER),
-        'buying_power':str(SIMULATED_BUYING_POWER),
-        'portfolio_value':str(SIMULATED_BUYING_POWER)
-    },'LOCAL VAST CASH SIMULATION'
-
-def reconcile_pending():
+            return r.json(),'ALPACA PAPER ACCOUNT (brokerage-reported)'
+        return None,f'Alpaca PAPER account HTTP {r.status_code}: {r.text[:300]}'
+    except Exception as e:
+        return None,f'Alpaca PAPER account connection failed: {e}'
+ef reconcile_pending():
     if SIM_MODE:return []
     h=hdr()
     if not h:return []
@@ -257,21 +251,19 @@ def buy(symbol,budget):
     except Exception as e:return False,f'PAPER trade error: {e}'
 def show_account_diagnostics():
     st.header('🧾 PAPER ACCOUNT DIAGNOSTICS')
-    st.caption('LOCAL SIMULATED PAPER MODE: $1,000,000 starting buying power.')
-    if 'sim_cash' not in st.session_state:st.session_state.sim_cash=SIMULATED_BUYING_POWER
-    if 'sim_positions' not in st.session_state:st.session_state.sim_positions=[]
-    invested=sum(float(p.get('market_value',0) or 0) for p in st.session_state.sim_positions)
-    equity=st.session_state.sim_cash+invested
+    ac,msg=account_diagnostics()
+    if not ac:
+        st.error(msg)
+        st.info('No brokerage balance is being invented or displayed. Check Streamlit Secrets and the Alpaca PAPER account connection.')
+        return
     cols=st.columns(4)
-    cols[0].metric('💵 Cash',f"${st.session_state.sim_cash:,.2f}")
-    cols[1].metric('💰 Equity',f"${equity:,.2f}")
-    cols[2].metric('🏦 Buying Power',f"${st.session_state.sim_cash:,.2f}")
-    cols[3].metric('📊 Portfolio Value',f"${equity:,.2f}")
-    st.success('ACCOUNT MODE: LOCAL VAST CASH SIMULATION')
-    if st.session_state.sim_positions:
-        st.subheader('📈 Simulated Positions')
-        st.dataframe(pd.DataFrame(st.session_state.sim_positions),use_container_width=True,hide_index=True)
-    else:st.info('No simulated positions yet.')
+    cols[0].metric('💵 Cash',f"${float(ac.get('cash',0) or 0):,.2f}")
+    cols[1].metric('💰 Equity',f"${float(ac.get('equity',0) or 0):,.2f}")
+    cols[2].metric('🏦 Buying Power',f"${float(ac.get('buying_power',0) or 0):,.2f}")
+    cols[3].metric('📊 Portfolio Value',f"${float(ac.get('portfolio_value',0) or 0):,.2f}")
+    st.success('ACCOUNT MODE: ALPACA PAPER ACCOUNT')
+    st.caption('Values above are reported by the Alpaca paper-trading API.')
+
 st.title('⚒️ VAST CASH');
 try:
     reconciled=reconcile_pending()
