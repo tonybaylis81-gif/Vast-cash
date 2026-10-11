@@ -230,6 +230,13 @@ def buy(symbol,budget,buy_trigger=None):
         ac=a.json()
         cash=float(ac.get('cash',0) or 0)
         buying_power=float(ac.get('buying_power',0) or 0)
+        # Never add to an existing holding or stack duplicate open buy orders.
+        pos=requests.get(f'{TRADE}/v2/positions/{symbol}',headers=h,timeout=10)
+        if pos.status_code==200:return False,f'PAPER BUY skipped for {symbol}: a position already exists; manage the existing position first.'
+        if pos.status_code not in (200,404):return False,f'PAPER BUY blocked: could not verify existing position (HTTP {pos.status_code}).'
+        open_orders=requests.get(f'{TRADE}/v2/orders',headers=h,params={'status':'open','symbols':symbol,'limit':100},timeout=10)
+        if open_orders.status_code!=200:return False,f'PAPER BUY blocked: could not verify open orders (HTTP {open_orders.status_code}).'
+        if any(o.get('side')=='buy' for o in open_orders.json()):return False,f'PAPER BUY skipped for {symbol}: an open buy order already exists.'
         if cash<=0 or buying_power<=0:
             return False,f'PAPER BUY blocked for {symbol}: cash ${cash:,.2f}, buying power ${buying_power:,.2f}. No order submitted.'.replace('$','\\$')
         spendable=min(float(budget),cash,buying_power)
@@ -261,6 +268,41 @@ def buy(symbol,budget,buy_trigger=None):
         msg=f'PAPER BUY {symbol}: {fq} shares @ ${fill:.2f}. AUTO-SELL at +10% (${target:.2f}) until target is reached.'
         return True,msg if x.status_code in (200,201) else msg+' WARNING: target order was not accepted.'
     except Exception as e:return False,f'PAPER trade error: {e}'
+def show_positions_and_orders():
+    h=hdr()
+    if not h:
+        st.warning('Positions and order history unavailable until Alpaca PAPER credentials connect.')
+        return
+    try:
+        pr=requests.get(f'{TRADE}/v2/positions',headers=h,timeout=10)
+        if pr.status_code==200:
+            positions=pr.json()
+            st.subheader('📦 CURRENT PAPER POSITIONS')
+            if positions:
+                rows=[{'Symbol':p.get('symbol'),'Qty':p.get('qty'),'Side':p.get('side'),'Avg Entry':p.get('avg_entry_price'),'Current Price':p.get('current_price'),'Market Value':p.get('market_value'),'Unrealized P/L':p.get('unrealized_pl')} for p in positions]
+                st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+            else:st.info('No open stock positions reported by Alpaca.')
+        else:st.error(f'Could not retrieve positions (HTTP {pr.status_code}): {pr.text[:200]}')
+        oo=requests.get(f'{TRADE}/v2/orders',headers=h,params={'status':'open','limit':100,'direction':'desc'},timeout=10)
+        if oo.status_code==200:
+            orders=oo.json()
+            st.subheader('🧾 OPEN PAPER ORDERS')
+            if orders:
+                rows=[{'Symbol':o.get('symbol'),'Side':o.get('side'),'Qty':o.get('qty'),'Filled':o.get('filled_qty'),'Type':o.get('type'),'Limit Price':o.get('limit_price'),'Status':o.get('status'),'Submitted':o.get('submitted_at')} for o in orders]
+                st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+            else:st.info('No open orders reported by Alpaca.')
+        else:st.error(f'Could not retrieve open orders (HTTP {oo.status_code}): {oo.text[:200]}')
+        recent=requests.get(f'{TRADE}/v2/orders',headers=h,params={'status':'all','limit':20,'direction':'desc','nested':'true'},timeout=10)
+        if recent.status_code==200:
+            orders=recent.json()
+            st.subheader('🕘 RECENT PAPER ORDER HISTORY')
+            if orders:
+                rows=[{'Symbol':o.get('symbol'),'Side':o.get('side'),'Qty':o.get('qty'),'Filled':o.get('filled_qty'),'Avg Fill':o.get('filled_avg_price'),'Type':o.get('type'),'Status':o.get('status'),'Submitted':o.get('submitted_at')} for o in orders]
+                st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+            else:st.info('No recent orders returned by Alpaca.')
+        else:st.error(f'Could not retrieve recent order history (HTTP {recent.status_code}): {recent.text[:200]}')
+    except Exception as e:st.error(f'Positions/order diagnostics failed: {e}')
+
 def show_account_diagnostics():
     st.header('🧾 PAPER ACCOUNT DIAGNOSTICS')
     ac,msg=account_diagnostics()
@@ -275,6 +317,8 @@ def show_account_diagnostics():
     cols[3].metric('📊 Portfolio Value',f"${float(ac.get('portfolio_value',0) or 0):,.2f}")
     st.success('ACCOUNT MODE: ALPACA PAPER ACCOUNT')
     st.caption('Values above are reported by the Alpaca paper-trading API.')
+    if float(ac.get('cash',0) or 0)<0 or float(ac.get('buying_power',0) or 0)<=0:
+        st.error('TRADING PAUSED: cash is negative or buying power is zero. New buys are blocked until the account is reconciled.')
 
 st.title('⚒️ VAST CASH');
 try:
@@ -283,11 +327,14 @@ try:
 except Exception:
     pass
 show_account_diagnostics()
+with st.expander('🔎 Inspect positions, open orders and recent order history',expanded=True):
+    show_positions_and_orders()
 st.divider()
 st.subheader('STOCK TRADING FOR WELDERS')
 st.caption('MAXPROFIT ranks historical setups. YES / NO is your decision. Orders, if submitted, go to the ALPACA PAPER account only.')
 with st.sidebar:
-    buy_drop=st.slider('Buy % below recent high',1,20,15);capital=st.number_input('Backtest starting capital ($)',100.,1000000.,1000000.,100.);allocation=st.slider('Maximum available buying power allocated (%)',5,100,50,5)
+    buy_drop=st.slider('Buy % below recent high',1,20,15);capital=st.number_input('Backtest starting capital ($)',100.,1000000.,1000000.,100.);allocation=st.slider('Maximum available buying power allocated (%)',5,25,10,5)
+    auto_trade=st.checkbox('Enable automatic paper trading after MAXPROFIT runs',value=False,help='When enabled, MAXPROFIT submits paper buys only for current BUY signals. Account cash, buying power, price trigger, existing positions and open orders are checked first.')
     st.caption('PAPER EXIT: after a paper buy fills, VAST CASH attempts a +10% limit sell. Paper orders only, no live-money orders.')
 if 'top10' not in st.session_state:st.session_state.top10=None
 if 'decisions' not in st.session_state:st.session_state.decisions={}
@@ -326,6 +373,22 @@ if st.button('⚡ RUN MAXPROFIT',type='primary',use_container_width=True):
                 st.caption(f'📊 {hist_status}')
                 status.success(f'Finished testing {total} stocks. {len(ranked)} produced usable historical setups.')
                 progress.progress(1.0,text='MAXPROFIT calculation complete')
+                if auto_trade:
+                    candidates=[x for x in st.session_state.top10 if float(x.get('Price',0))<=float(x.get('Buy Trigger',0))]
+                    candidates=candidates[:3]
+                    if not candidates:st.info('AUTO-PAPER: no top-ranked stocks currently meet their buy trigger. No orders submitted.')
+                    else:
+                        ac=account()
+                        cash=float((ac or {}).get('cash',0) or 0);bp=float((ac or {}).get('buying_power',0) or 0)
+                        spendable=min(max(0,cash),max(0,bp))
+                        if spendable<=0:st.error(f'AUTO-PAPER STOPPED. Cash ${cash:,.2f}; buying power ${bp:,.2f}. Both must be positive. No orders submitted.')
+                        else:
+                            budget=spendable*allocation/100/len(candidates)
+                            st.subheader('🤖 AUTOMATIC PAPER ORDERS')
+                            for candidate in candidates:
+                                ok,msg=buy(candidate['Ticker'],budget,candidate.get('Buy Trigger'))
+                                if ok:st.success(msg)
+                                else:st.warning(msg)
         except Exception as e:
             runner.markdown('## 🛑 **MAXPROFIT ERROR**')
             st.error(f'MAXPROFIT encountered an error: {e}')
