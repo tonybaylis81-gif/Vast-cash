@@ -341,13 +341,12 @@ st.divider()
 st.subheader('STOCK TRADING FOR WELDERS')
 st.caption('MAXPROFIT ranks historical setups. YES / NO is your decision. Orders, if submitted, go to the ALPACA PAPER account only.')
 with st.sidebar:
-    buy_drop=st.slider('Buy % below recent high',1,20,15);target_choice=st.selectbox('Profit target',options=[5,10],index=0,format_func=lambda v:f'+{v}%');TARGET=target_choice/100;capital=st.number_input('Backtest starting capital ($)',100.,1000000.,1000000.,100.);allocation=st.slider('Maximum available buying power allocated per run (%)',1,10,5,1)
-    auto_trade=st.checkbox('Enable automatic paper trading after daily scan',value=True,help='Paper trades only. Each qualifying buy requests a take-profit order and protective stop-loss. Stop prices do not guarantee the final selling price.')
-    st.caption(f'PAPER ONLY. Take-profit +{TARGET:.0%}; protective stop −{STOP_LOSS:.0%}. No live-money orders.')
+    buy_drop=st.slider('Buy % below recent high',1,20,15);target_choice=st.selectbox('Profit target',options=[5,10],index=0,format_func=lambda v:f'+{v}%');TARGET=target_choice/100;capital=st.number_input('Backtest starting capital ($)',100.,1000000.,1000000.,100.);allocation=st.slider('Account balance to risk per approved trade (%)',1,5,2,1)
+    st.caption(f'PAPER ONLY. Take-profit +{TARGET:.0%}; protective stop −{STOP_LOSS:.0%}. You approve each trade with YES. NO skips it.')
 if 'top10' not in st.session_state:st.session_state.top10=None
 if 'decisions' not in st.session_state:st.session_state.decisions={}
 if 'pending_orders' not in st.session_state:st.session_state.pending_orders={}
-if st.button('🔎 WHAT ARE MY TEN BEST OPTIONS TODAY?',type='primary',use_container_width=True):
+if st.button('🔎 FIND MY BEST OPTION TODAY',type='primary',use_container_width=True):
     if not hdr():
         st.error('Alpaca PAPER credentials are not available. Check Streamlit Secrets.')
     else:
@@ -383,82 +382,65 @@ if st.button('🔎 WHAT ARE MY TEN BEST OPTIONS TODAY?',type='primary',use_conta
                 status.success(f'Checked {total} stocks. {len(qualified)} passed the filters: positive historical average return, at least {MIN_WIN_RATE:.0%} target-hit rate, and {MIN_HISTORICAL_TRADES}+ historical tests.')
                 if not qualified:st.warning('No stocks passed the filters today. The app will not force a trade just to fill ten slots.')
                 progress.progress(1.0,text='MAXPROFIT calculation complete')
-                if auto_trade:
-                    candidates=[x for x in st.session_state.top10 if float(x.get('Price',0))<=float(x.get('Buy Trigger',0))]
-                    candidates=candidates[:2]
-                    if not candidates:st.info('AUTO-PAPER: no top-ranked stocks currently meet their buy trigger. No orders submitted.')
-                    else:
-                        ac=account()
-                        cash=float((ac or {}).get('cash',0) or 0);bp=float((ac or {}).get('buying_power',0) or 0)
-                        spendable=min(max(0,cash),max(0,bp))
-                        if spendable<=0:st.error(f'AUTO-PAPER STOPPED. Cash ${cash:,.2f}; buying power ${bp:,.2f}. Both must be positive. No orders submitted.')
-                        else:
-                            budget=spendable*allocation/100/len(candidates)
-                            st.subheader('🤖 AUTOMATIC PAPER ORDERS')
-                            for candidate in candidates:
-                                ok,msg=buy(candidate['Ticker'],budget,candidate.get('Buy Trigger'))
-                                if ok:st.success(msg)
-                                else:st.warning(msg)
+                st.session_state.option_index=0
+                st.session_state.last_order_message=None
         except Exception as e:
             runner.markdown('## 🛑 **MAXPROFIT ERROR**')
             st.error(f'MAXPROFIT encountered an error: {e}')
 if st.session_state.top10:
-    st.header('🎯 TODAY’S TRADE PLAN')
-    st.caption('These are the ten highest-ranked setups from MAXPROFIT. The plan gives you the entry trigger, target, and historically typical time to target.')
-    plan=[]
-    for rank,x in enumerate(st.session_state.top10,1):
-        current=float(x['Price']); trigger=float(x['Buy Trigger']); target=float(x['Sell Target'])
-        action='BUY' if current<=trigger else 'WAIT'
-        plan.append({'#':rank,'STOCK':x['Ticker'],'ACTION':action,'CURRENT':current,'BUY AT':trigger,'TAKE PROFIT':target,'STOP LOSS':x.get('Stop Loss',trigger*(1-STOP_LOSS)),'TYPICAL HOLD (TRADING DAYS)':x['Typical Hold'],'WIN RATE':x['Win Rate'],'HISTORICAL AVG RETURN':x['Expected Return'],'TESTS':x['Historical Trades']})
-    st.dataframe(pd.DataFrame(plan).style.format({'CURRENT':'${:,.2f}','BUY AT':'${:,.2f}','TAKE PROFIT':'${:,.2f}','STOP LOSS':'${:,.2f}','WIN RATE':'{:.0%}','HISTORICAL AVG RETURN':'{:+.1%}'}),use_container_width=True,hide_index=True)
-    st.info(f'ACTION = BUY only when the current price is at or below the entry trigger. Each paper buy requests a +{TARGET:.0%} take-profit and a −{STOP_LOSS:.0%} stop-loss. Stop orders cannot guarantee the final exit price.')
+    top=st.session_state.top10
+    if 'option_index' not in st.session_state:st.session_state.option_index=0
+    idx=st.session_state.option_index
+    st.header('🎯 ONE OPTION AT A TIME')
+    st.caption('Review one candidate. YES submits one paper order if the price and account checks pass. NO skips it and shows the next candidate.')
+    if idx>=len(top):
+        st.info('You have reviewed every qualifying option today. Run a new scan later for fresh candidates.')
+    else:
+        x=top[idx];t=x['Ticker'];current=float(x['Price']);trigger=float(x['Buy Trigger']);target=trigger*(1+TARGET);stop=trigger*(1-STOP_LOSS)
+        with st.container(border=True):
+            st.caption(f'OPTION {idx+1} OF {len(top)}')
+            st.subheader(f'{t} · {"BUY SETUP" if current<=trigger else "WAIT FOR BUY PRICE"}')
+            a,b,c1=st.columns(3)
+            a.metric('Current price',f"${current:.2f}")
+            b.metric('Buy only at or below',f"${trigger:.2f}")
+            c1.metric('Profit target',f"${target:.2f}",f"+{TARGET:.0%}")
+            st.write(f"**Protective stop trigger:** ${stop:.2f} (−{STOP_LOSS:.0%})")
+            st.write(f"**Historical target-hit rate:** {x['Win Rate']:.0%} across {x['Historical Trades']} tests")
+            st.write(f"**Average historical trade return:** {x['Expected Return']:+.1%} · **Typical hold:** {x['Typical Hold']} trading days")
+            st.caption('Historical performance is not a guarantee. Stop orders can execute below the stop price. Paper trading only.')
+            yes_col,no_col=st.columns(2)
+            if yes_col.button('✅ YES, BUY THIS OPTION',key=f'yes_option_{idx}_{t}',type='primary',use_container_width=True):
+                ac=account()
+                cash=float((ac or {}).get('cash',0) or 0);bp=float((ac or {}).get('buying_power',0) or 0)
+                spendable=min(max(0,cash),max(0,bp))
+                if not ac:st.error('Order blocked: cannot verify Alpaca PAPER account.')
+                elif spendable<=0:st.error(f'Order blocked. Paper cash ${cash:,.2f}; buying power ${bp:,.2f}. Account must be reconciled first.')
+                elif current>trigger:st.warning(f'No order sent. Current price ${current:.2f} is above the buy trigger ${trigger:.2f}. Choose NO to review the next option.')
+                else:
+                    budget=spendable*allocation/100
+                    ok,msg=buy(t,budget,trigger)
+                    if ok:
+                        st.success(msg)
+                        st.session_state.option_index=idx+1
+                    else:st.error(msg)
+            if no_col.button('❌ NO, SKIP THIS ONE',key=f'no_option_{idx}_{t}',use_container_width=True):
+                st.session_state.option_index=idx+1
+                st.rerun()
     st.divider()
-    st.subheader('🧪 STRATEGY PROFITABILITY TEST')
+    st.subheader('🧪 TEST THE STRATEGY BEFORE TRUSTING IT')
     if st.button('📈 TEST WHETHER VAST CASH MAKES MONEY',use_container_width=True):
         hist,_=all_hist()
         if hist:
             with st.spinner('Running the historical strategy test...'):
                 trades,stats=backtest_strategy(hist,buy_drop,capital)
             if stats:
-                a,b,c,d=st.columns(4)
+                a,b,c1,d=st.columns(4)
                 a.metric('Starting',f"${stats['Starting Capital']:,.0f}")
                 b.metric('Ending',f"${stats['Ending Capital']:,.0f}")
-                c.metric('Net Profit',f"${stats['Net Profit']:,.0f}")
+                c1.metric('Net Profit',f"${stats['Net Profit']:,.0f}")
                 d.metric('Max Drawdown',f"{stats['Max Drawdown']:.1%}")
                 st.write(f"**Trades:** {stats['Total Trades']} • **Win rate:** {stats['Win Rate']:.1%} • **Average trade:** {stats['Avg Trade Return']:+.2%} • **Best:** {stats['Best Trade']:+.2%} • **Worst:** {stats['Worst Trade']:+.2%}")
-                st.caption('This is a historical simulation, not a promise of future returns. It does not include commissions, slippage, taxes, or market-impact effects.')
+                st.caption('Historical simulation only. It does not include all real-world trading costs and cannot guarantee future results.')
                 st.dataframe(trades,use_container_width=True,hide_index=True)
-            else: st.warning('No qualifying historical trades were found.')
-        else: st.error('Historical market data could not be loaded.')
-
-if st.session_state.top10:
-    top=st.session_state.top10;st.success(f'MAXPROFIT found Top {len(top)} historical setups.');st.header('🏆 TOP 10 — YOUR DECISION')
-    for i,x in enumerate(top,1):
-        t=x['Ticker']
-        with st.container(border=True):
-            a,b,c,d=st.columns([.6,1.2,1.4,1.4]);a.metric('#',i);b.metric('STOCK',t);c.metric('Historical return',f"{x['Expected Return']:+.1%}");d.metric('Win rate',f"{x['Win Rate']:.0%}")
-            st.write(f"**Typical historical target time:** {x['Typical Hold']} trading days • **Current:** ${x['Price']:.2f}")
-            st.write(f"**Buy trigger:** ${x['Buy Trigger']:.2f} • **Take profit:** +{TARGET:.0%} • **Protective stop:** −{STOP_LOSS:.0%} • **Tests:** {x['Historical Trades']}")
-            l,r=st.columns(2)
-            if l.button('✅ YES',key=f'yes_{t}',use_container_width=True):st.session_state.decisions[t]='YES'
-            if r.button('❌ NO',key=f'no_{t}',use_container_width=True):st.session_state.decisions[t]='NO'
-            if st.session_state.decisions.get(t)=='YES':st.success('YES selected')
-            elif st.session_state.decisions.get(t)=='NO':st.info('NO selected')
-            else:st.warning('Not decided')
-    complete=all(st.session_state.decisions.get(x['Ticker']) in ('YES','NO') for x in top);yes=[x for x in top if st.session_state.decisions.get(x['Ticker'])=='YES'];st.metric('YES selections',f'{len(yes)} / {len(top)}')
-    if st.button('🚀 SUBMIT SELECTED TO ALPACA PAPER',type='primary',disabled=not complete,use_container_width=True):
-        if not yes:st.info('All NO. Nothing sent.')
-        else:
-            ac=account()
-            if not ac:st.error('Could not access Alpaca PAPER account.')
-            else:
-                cash=float(ac.get('cash',0) or 0);buying_power=float(ac.get('buying_power',0) or 0)
-                spendable=min(max(0,cash),max(0,buying_power))
-                if spendable<=0:st.error(f'NO ORDERS SENT. Paper account cash is ${cash:,.2f} and buying power is ${buying_power:,.2f}. Both must be positive.')
-                else:
-                    budget=spendable*allocation/100/len(yes);st.subheader('📨 ALPACA PAPER ORDERS')
-                    for x in yes:
-                        ok,msg=buy(x['Ticker'],budget,x.get('Buy Trigger'))
-                        if ok:st.success(msg)
-                        else:st.error(msg)
-st.divider();st.caption('🔒 ALPACA PAPER TRADING ONLY. Paper orders may be submitted to Alpaca; no live-money orders are sent. Historical backtests are separate simulations.')
+            else:st.warning('No qualifying historical trades were found.')
+        else:st.error('Historical market data could not be loaded.')
