@@ -334,7 +334,7 @@ st.subheader('STOCK TRADING FOR WELDERS')
 st.caption('MAXPROFIT ranks historical setups. YES / NO is your decision. Orders, if submitted, go to the ALPACA PAPER account only.')
 with st.sidebar:
     buy_drop=st.slider('Buy % below recent high',1,20,15);capital=st.number_input('Backtest starting capital ($)',100.,1000000.,1000000.,100.);allocation=st.slider('Maximum available buying power allocated (%)',5,25,10,5)
-    auto_trade=st.checkbox('Enable automatic paper trading after MAXPROFIT runs',value=False,help='When enabled, MAXPROFIT submits paper buys only for current BUY signals. Account cash, buying power, price trigger, existing positions and open orders are checked first.')
+    auto_trade=st.checkbox('Enable automatic paper trading after MAXPROFIT runs',value=True,help='When enabled, MAXPROFIT submits paper buys only for current BUY signals. Account cash, buying power, price trigger, existing positions and open orders are checked first.')
     st.caption('PAPER EXIT: after a paper buy fills, VAST CASH attempts a +10% limit sell. Paper orders only, no live-money orders.')
 if 'top10' not in st.session_state:st.session_state.top10=None
 if 'decisions' not in st.session_state:st.session_state.decisions={}
