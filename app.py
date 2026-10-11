@@ -181,6 +181,12 @@ def reconcile_pending():
             o=z.json();status=o.get('status','');fill=float(o.get('filled_avg_price') or 0);fq=int(float(o.get('filled_qty') or 0))
             if status in ('filled','partially_filled') and fill>0 and fq>0:
                 target=round(fill*(1+TARGET),2)
+                # New orders are bracket orders: Alpaca manages their attached take-profit and stop-loss.
+                # Do not submit a second, competing sell order for the same shares.
+                if o.get('order_class') == 'bracket':
+                    done.append(f'{symbol}: bracket buy filled {fq} @ ${fill:.2f}; attached take-profit near ${target:.2f} and protective stop are managed by Alpaca PAPER.')
+                    del pending[oid]
+                    continue
                 existing=requests.get(f'{TRADE}/v2/orders',headers=h,params={'status':'open','symbols':symbol,'limit':100,'nested':'true'},timeout=10)
                 has_sell=False
                 if existing.status_code==200:
@@ -189,7 +195,7 @@ def reconcile_pending():
                 if not has_sell:
                     x=requests.post(f'{TRADE}/v2/orders',headers={**h,'Content-Type':'application/json'},json={'symbol':symbol,'qty':str(fq),'side':'sell','type':'limit','limit_price':f'{target:.2f}','time_in_force':'gtc'},timeout=15)
                     if x.status_code not in (200,201):continue
-                done.append(f'{symbol}: filled {fq} @ ${fill:.2f}; +10% GTC sell at ${target:.2f} is active.')
+                done.append(f'{symbol}: filled {fq} @ ${fill:.2f}; +{TARGET:.0%} GTC sell at ${target:.2f} is active.')
                 del pending[oid]
             elif status in ('canceled','expired','rejected','done_for_day'):del pending[oid]
         except Exception:continue
