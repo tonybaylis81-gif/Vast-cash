@@ -181,7 +181,7 @@ def reconcile_pending():
             o=z.json();status=o.get('status','');fill=float(o.get('filled_avg_price') or 0);fq=int(float(o.get('filled_qty') or 0))
             if status in ('filled','partially_filled') and fill>0 and fq>0:
                 target=round(fill*(1+TARGET),2)
-                existing=requests.get(f'{TRADE}/v2/orders',headers=h,params={'status':'open','symbols':symbol,'limit':100},timeout=10)
+                existing=requests.get(f'{TRADE}/v2/orders',headers=h,params={'status':'open','symbols':symbol,'limit':100,'nested':'true'},timeout=10)
                 has_sell=False
                 if existing.status_code==200:
                     for so in existing.json():
