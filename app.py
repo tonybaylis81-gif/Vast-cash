@@ -158,7 +158,7 @@ def account():
     except Exception:pass
     return None
 
-dedef account_diagnostics():
+def account_diagnostics():
     h=hdr()
     if not h:return None,'Alpaca PAPER credentials unavailable. No real account balance is available.'
     try:
@@ -168,7 +168,7 @@ dedef account_diagnostics():
         return None,f'Alpaca PAPER account HTTP {r.status_code}: {r.text[:300]}'
     except Exception as e:
         return None,f'Alpaca PAPER account connection failed: {e}'
-ef reconcile_pending():
+def reconcile_pending():
     if SIM_MODE:return []
     h=hdr()
     if not h:return []
