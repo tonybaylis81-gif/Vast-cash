@@ -244,7 +244,7 @@ def buy(symbol,budget,buy_trigger=None):
             positions=st.session_state.setdefault('sim_positions',[])
             positions.append({'Ticker':symbol,'Quantity':qty,'Entry Price':round(ask,2),'Cost':cost,'Target Price':target,'Target Gain':f'+{TARGET:.0%}','Status':'OPEN'})
             st.session_state.setdefault('sim_orders',[]).append({'Ticker':symbol,'Side':'BUY','Quantity':qty,'Fill Price':round(ask,2),'Cost':cost,'Target Price':target,'Status':'FILLED'})
-            return True,f'SIM BUY {symbol}: {qty} shares @ ${ask:.2f}. Simulated +{TARGET:.0%} target: ${target:.2f}. NO ALPACA ORDER SENT.'.replace('
+            return True,f'SIM BUY {symbol}: {qty} shares @ ${ask:.2f}. Simulated +{TARGET:.0%} target: ${target:.2f}. NO ALPACA ORDER SENT.'
         except Exception as e:return False,f'SIM trade error: {e}'
     h=hdr()
     if not h:return False,'Alpaca PAPER credentials unavailable.'
