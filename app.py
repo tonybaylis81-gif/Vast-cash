@@ -244,7 +244,7 @@ def buy(symbol,budget,buy_trigger=None):
             positions=st.session_state.setdefault('sim_positions',[])
             positions.append({'Ticker':symbol,'Quantity':qty,'Entry Price':round(ask,2),'Cost':cost,'Target Price':target,'Target Gain':f'+{TARGET:.0%}','Status':'OPEN'})
             st.session_state.setdefault('sim_orders',[]).append({'Ticker':symbol,'Side':'BUY','Quantity':qty,'Fill Price':round(ask,2),'Cost':cost,'Target Price':target,'Status':'FILLED'})
-            return True,f'SIM BUY {symbol}: {qty} shares @ ${ask:.2f}. Simulated +10% target: ${target:.2f}. NO ALPACA ORDER SENT.'.replace('$','\\$')
+            return True,f'SIM BUY {symbol}: {qty} shares @ ${ask:.2f}. Simulated +{TARGET:.0%} target: ${target:.2f}. NO ALPACA ORDER SENT.'.replace('
         except Exception as e:return False,f'SIM trade error: {e}'
     h=hdr()
     if not h:return False,'Alpaca PAPER credentials unavailable.'
@@ -414,7 +414,443 @@ if st.session_state.top10:
     if idx>=len(top):
         st.info('You have reviewed every qualifying option today. Run a new scan later for fresh candidates.')
     else:
-        x=top[idx];t=x['Ticker'];current=float(x['Price']);trigger=float(x['Buy Trigger']);reference=float(x.get('Reference Average',trigger/(1-0.05)));target=trigger*(1+TARGET);stop=trigger*(1-STOP_LOSS)
+        x=top[idx];t=x['Ticker'];current=float(x['Price']);trigger=float(x['Buy Trigger']);reference=float(x.get('Reference Average',trigger/(1-buy_drop/100)));target=trigger*(1+TARGET);stop=trigger*(1-STOP_LOSS)
+        with st.container(border=True):
+            st.caption(f'OPTION {idx+1} OF {len(top)}')
+            st.subheader(f'{t} · {"BUY SETUP" if current<=trigger else "WAIT FOR BUY PRICE"}')
+            a,b,c1=st.columns(3)
+            a.metric('Current price',f"${current:.2f}")
+            b.metric('20-day average',f"${reference:.2f}")
+            c1.metric('Buy only at or below',f"${trigger:.2f}",f"{(trigger/reference-1):+.1%} vs average")
+            st.write(f"**After a fill:** automatic take-profit at +{TARGET:.0%} of the actual fill price and protective stop at −{STOP_LOSS:.0%} of the actual fill price. The final prices are set by Alpaca's bracket order.")
+            st.write(f"**Historical target-hit rate:** {x['Win Rate']:.0%} across {x['Historical Trades']} tests")
+            st.write(f"**Average historical trade return:** {x['Expected Return']:+.1%} · **Typical hold:** {x['Typical Hold']} trading days")
+            st.caption('Historical performance is not a guarantee. Stop orders can execute below the stop price. Paper trading only.')
+            yes_col,no_col=st.columns(2)
+            if yes_col.button('✅ YES, BUY THIS OPTION',key=f'yes_option_{idx}_{t}',type='primary',use_container_width=True):
+                ac=account()
+                cash=float((ac or {}).get('cash',0) or 0);bp=float((ac or {}).get('buying_power',0) or 0)
+                spendable=min(max(0,cash),max(0,bp))
+                if not ac:st.error('Order blocked: cannot verify Alpaca PAPER account.')
+                elif spendable<=0:st.error(f'Order blocked. Paper cash ${cash:,.2f}; buying power ${bp:,.2f}. Account must be reconciled first.')
+                elif current>trigger:st.warning(f'No order sent. Current price ${current:.2f} is above the buy trigger ${trigger:.2f}. Choose NO to review the next option.')
+                else:
+                    budget=spendable*allocation/100
+                    ok,msg=buy(t,budget,trigger)
+                    if ok:
+                        st.success(msg)
+                        st.session_state.option_index=idx+1
+                    else:st.error(msg)
+            if no_col.button('❌ NO, SKIP THIS ONE',key=f'no_option_{idx}_{t}',use_container_width=True):
+                st.session_state.option_index=idx+1
+                st.rerun()
+    st.divider()
+    st.subheader('🧪 TEST THE STRATEGY BEFORE TRUSTING IT')
+    if st.button('📈 TEST WHETHER VAST CASH MAKES MONEY',use_container_width=True):
+        hist,_=all_hist()
+        if hist:
+            with st.spinner('Running the historical strategy test...'):
+                trades,stats=backtest_strategy(hist,buy_drop,capital)
+            if stats:
+                a,b,c1,d=st.columns(4)
+                a.metric('Starting',f"${stats['Starting Capital']:,.0f}")
+                b.metric('Ending',f"${stats['Ending Capital']:,.0f}")
+                c1.metric('Net Profit',f"${stats['Net Profit']:,.0f}")
+                d.metric('Max Drawdown',f"{stats['Max Drawdown']:.1%}")
+                st.write(f"**Trades:** {stats['Total Trades']} • **Win rate:** {stats['Win Rate']:.1%} • **Average trade:** {stats['Avg Trade Return']:+.2%} • **Best:** {stats['Best Trade']:+.2%} • **Worst:** {stats['Worst Trade']:+.2%}")
+                st.caption('Historical simulation only. It does not include all real-world trading costs and cannot guarantee future results.')
+                st.dataframe(trades,use_container_width=True,hide_index=True)
+            else:st.warning('No qualifying historical trades were found.')
+        else:st.error('Historical market data could not be loaded.')
+,'\\
+        except Exception as e:return False,f'SIM trade error: {e}'
+    h=hdr()
+    if not h:return False,'Alpaca PAPER credentials unavailable.'
+    try:
+        a=requests.get(f'{TRADE}/v2/account',headers=h,timeout=10)
+        if a.status_code!=200:return False,f'PAPER BUY blocked: account check failed (HTTP {a.status_code}); no order submitted.'
+        ac=a.json()
+        cash=float(ac.get('cash',0) or 0)
+        buying_power=float(ac.get('buying_power',0) or 0)
+        # Never add to an existing holding or stack duplicate open buy orders.
+        pos=requests.get(f'{TRADE}/v2/positions/{symbol}',headers=h,timeout=10)
+        if pos.status_code==200:return False,f'PAPER BUY skipped for {symbol}: a position already exists; manage the existing position first.'
+        if pos.status_code not in (200,404):return False,f'PAPER BUY blocked: could not verify existing position (HTTP {pos.status_code}).'
+        open_orders=requests.get(f'{TRADE}/v2/orders',headers=h,params={'status':'open','symbols':symbol,'limit':100},timeout=10)
+        if open_orders.status_code!=200:return False,f'PAPER BUY blocked: could not verify open orders (HTTP {open_orders.status_code}).'
+        if any(o.get('side')=='buy' for o in open_orders.json()):return False,f'PAPER BUY skipped for {symbol}: an open buy order already exists.'
+        if cash<=0 or buying_power<=0:
+            return False,f'PAPER BUY blocked for {symbol}: cash ${cash:,.2f}, buying power ${buying_power:,.2f}. No order submitted.'.replace('$','\\$')
+        spendable=min(float(budget),cash,buying_power)
+        q=requests.get(f'{DATA}/v2/stocks/quotes/latest',headers=h,params={'symbols':symbol,'feed':'iex'},timeout=10);ask=0
+        if q.status_code==200:
+            quotes=q.json().get('quotes',{});quote=quotes.get(symbol,{})
+            ask=float(quote.get('ap') or 0);bid=float(quote.get('bp') or 0);ask=ask or bid
+        if ask<=0:
+            snap=requests.get(f'{DATA}/v2/stocks/{symbol}/snapshot',headers=h,params={'feed':'iex'},timeout=10)
+            if snap.status_code==200:
+                sd=snap.json();ask=float((sd.get('latestTrade') or {}).get('p') or (sd.get('dailyBar') or {}).get('c') or 0)
+        if ask<=0:return False,f'No usable price for {symbol}; no order submitted.'
+        if buy_trigger is not None and ask>float(buy_trigger):
+            return False,f'PAPER BUY skipped for {symbol}: current ask ${ask:.2f} is above buy trigger ${float(buy_trigger):.2f}.'.replace('$','\\$')
+        qty=int((spendable*0.98)/ask)
+        if qty<1:return False,f'PAPER BUY skipped for {symbol}: no whole share fits the safe budget of ${spendable:,.2f}.'.replace('$','\\$')
+        if qty*ask>spendable:return False,'PAPER BUY blocked: estimated cost exceeds budget; no order submitted.'
+        target=round(ask*(1+TARGET),2);stop=round(ask*(1-STOP_LOSS),2)
+        payload={'symbol':symbol,'qty':str(qty),'side':'buy','type':'market','time_in_force':'day','order_class':'bracket','take_profit':{'limit_price':f'{target:.2f}'},'stop_loss':{'stop_price':f'{stop:.2f}'}}
+        r=requests.post(f'{TRADE}/v2/orders',headers={**h,'Content-Type':'application/json'},json=payload,timeout=15)
+        if r.status_code not in (200,201):return False,f'PAPER BRACKET BUY rejected: {r.text[:200]}'
+        oid=r.json()['id'];st.session_state.setdefault('pending_orders',{})[oid]=symbol;fill=0;fq=0
+        for _ in range(12):
+            time.sleep(1);z=requests.get(f'{TRADE}/v2/orders/{oid}',headers=h,timeout=10)
+            if z.status_code==200:
+                o=z.json();fill=float(o.get('filled_avg_price') or 0);fq=int(float(o.get('filled_qty') or 0))
+                if fill>0 and fq>0:break
+        if not fill:return True,f'PAPER BUY submitted for {symbol}; fill still pending. VAST CASH will reconcile it automatically.'
+        target=round(fill*(1+TARGET),2)
+        stop=round(fill*(1-STOP_LOSS),2)
+        msg=f'PAPER BRACKET BUY {symbol}: {fq} shares @ ${fill:.2f}. Take-profit ${target:.2f} (+{TARGET:.0%}); protective stop ${stop:.2f} (-{STOP_LOSS:.0%}) submitted as attached exits.'
+        return True,msg
+    except Exception as e:return False,f'PAPER trade error: {e}'
+def show_positions_and_orders():
+    h=hdr()
+    if not h:
+        st.warning('Positions and order history unavailable until Alpaca PAPER credentials connect.')
+        return
+    try:
+        pr=requests.get(f'{TRADE}/v2/positions',headers=h,timeout=10)
+        if pr.status_code==200:
+            positions=pr.json()
+            st.subheader('📦 CURRENT PAPER POSITIONS')
+            if positions:
+                rows=[{'Symbol':p.get('symbol'),'Qty':p.get('qty'),'Side':p.get('side'),'Avg Entry':p.get('avg_entry_price'),'Current Price':p.get('current_price'),'Market Value':p.get('market_value'),'Unrealized P/L':p.get('unrealized_pl')} for p in positions]
+                st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+            else:st.info('No open stock positions reported by Alpaca.')
+        else:st.error(f'Could not retrieve positions (HTTP {pr.status_code}): {pr.text[:200]}')
+        oo=requests.get(f'{TRADE}/v2/orders',headers=h,params={'status':'open','limit':100,'direction':'desc'},timeout=10)
+        if oo.status_code==200:
+            orders=oo.json()
+            st.subheader('🧾 OPEN PAPER ORDERS')
+            if orders:
+                rows=[{'Symbol':o.get('symbol'),'Side':o.get('side'),'Qty':o.get('qty'),'Filled':o.get('filled_qty'),'Type':o.get('type'),'Limit Price':o.get('limit_price'),'Status':o.get('status'),'Submitted':o.get('submitted_at')} for o in orders]
+                st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+            else:st.info('No open orders reported by Alpaca.')
+        else:st.error(f'Could not retrieve open orders (HTTP {oo.status_code}): {oo.text[:200]}')
+        recent=requests.get(f'{TRADE}/v2/orders',headers=h,params={'status':'all','limit':20,'direction':'desc','nested':'true'},timeout=10)
+        if recent.status_code==200:
+            orders=recent.json()
+            st.subheader('🕘 RECENT PAPER ORDER HISTORY')
+            if orders:
+                rows=[{'Symbol':o.get('symbol'),'Side':o.get('side'),'Qty':o.get('qty'),'Filled':o.get('filled_qty'),'Avg Fill':o.get('filled_avg_price'),'Type':o.get('type'),'Status':o.get('status'),'Submitted':o.get('submitted_at')} for o in orders]
+                st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+            else:st.info('No recent orders returned by Alpaca.')
+        else:st.error(f'Could not retrieve recent order history (HTTP {recent.status_code}): {recent.text[:200]}')
+    except Exception as e:st.error(f'Positions/order diagnostics failed: {e}')
+
+def show_account_diagnostics():
+    st.header('🧾 PAPER ACCOUNT DIAGNOSTICS')
+    ac,msg=account_diagnostics()
+    if not ac:
+        st.error(msg)
+        st.info('No brokerage balance is being invented or displayed. Check Streamlit Secrets and the Alpaca PAPER account connection.')
+        return
+    cols=st.columns(4)
+    cols[0].metric('💵 Cash',f"${float(ac.get('cash',0) or 0):,.2f}")
+    cols[1].metric('💰 Equity',f"${float(ac.get('equity',0) or 0):,.2f}")
+    cols[2].metric('🏦 Buying Power',f"${float(ac.get('buying_power',0) or 0):,.2f}")
+    cols[3].metric('📊 Portfolio Value',f"${float(ac.get('portfolio_value',0) or 0):,.2f}")
+    st.success('ACCOUNT MODE: ALPACA PAPER ACCOUNT')
+    st.caption('Values above are reported by the Alpaca paper-trading API.')
+    if float(ac.get('cash',0) or 0)<0 or float(ac.get('buying_power',0) or 0)<=0:
+        st.error('TRADING PAUSED: cash is negative or buying power is zero. New buys are blocked until the account is reconciled.')
+
+st.title('⚒️ VAST CASH');
+try:
+    reconciled=reconcile_pending()
+    for msg in reconciled:st.success('🔄 '+msg)
+except Exception:
+    pass
+show_account_diagnostics()
+with st.expander('🔎 Account details (optional)',expanded=False):
+    show_positions_and_orders()
+st.divider()
+st.subheader('STOCK TRADING FOR WELDERS')
+st.caption('One choice at a time. Press YES to submit a paper trade if the checks pass, or NO to skip it.')
+with st.sidebar:
+    buy_drop=st.slider('Buy % below 20-day average',1,10,5);target_choice=st.selectbox('Profit target',options=[5,10],index=0,format_func=lambda v:f'+{v}%');TARGET=target_choice/100;capital=st.number_input('Backtest starting capital ($)',100.,1000000.,1000000.,100.);allocation=st.slider('Account balance to risk per approved trade (%)',1,5,2,1)
+    st.caption(f'PAPER ONLY. Take-profit +{TARGET:.0%}; protective stop −{STOP_LOSS:.0%}. You approve each trade with YES. NO skips it.')
+if 'top10' not in st.session_state:st.session_state.top10=None
+if 'decisions' not in st.session_state:st.session_state.decisions={}
+if 'pending_orders' not in st.session_state:st.session_state.pending_orders={}
+if st.button('🔎 FIND MY BEST OPTION TODAY',type='primary',use_container_width=True):
+    if not hdr():
+        st.error('Alpaca PAPER credentials are not available. Check Streamlit Secrets.')
+    else:
+        runner=st.empty()
+        status=st.empty()
+        progress=st.progress(0,text='MAXPROFIT is starting...')
+        try:
+            runner.markdown('## 🏃‍♂️💨 **MAXPROFIT RUNNING**')
+            status.info('🏃 Fetching historical market data from Alpaca PAPER...')
+            hist, hist_status=all_hist()
+            if not hist:
+                progress.progress(0,text='MAXPROFIT stopped')
+                runner.markdown('## 🛑 **MAXPROFIT STOPPED**')
+                st.error(f'No historical market data was returned. {hist_status}')
+                st.code(hist_status, language='text')
+                st.info('MAXPROFIT did not submit or modify any order. This is a market-data retrieval failure.')
+            else:
+                ranked=[]
+                total=len(hist)
+                for i,(s,d) in enumerate(hist.items(),1):
+                    runner.markdown(f'## 🏃‍♂️💨 **MAXPROFIT RUNNING**  ·  {s}  ·  {i}/{total}')
+                    status.info(f'🔧 Testing {s}: historical +{TARGET:.0%} target hits, win rate and volatility...')
+                    x=score(s,d,buy_drop)
+                    if x:ranked.append(x)
+                    progress.progress(i/total,text=f'Calculating MAXPROFIT: {i}/{total} stocks')
+                # Rank by score, then expected return and win rate. Keep the full trade plan with each pick.
+                qualified=[x for x in ranked if x['Expected Return']>0 and x['Win Rate']>=MIN_WIN_RATE and x['Historical Trades']>=MIN_HISTORICAL_TRADES]
+                qualified.sort(key=lambda x:(x['Score'],x['Expected Return'],x['Win Rate']),reverse=True)
+                st.session_state.top10=qualified[:10]
+                st.session_state.decisions={x['Ticker']:None for x in st.session_state.top10}
+                runner.markdown('## ✅ **MAXPROFIT COMPLETE**')
+                st.caption(f'📊 {hist_status}')
+                status.success(f'Checked {total} stocks. {len(qualified)} passed the filters: positive historical average return, at least {MIN_WIN_RATE:.0%} target-hit rate, and {MIN_HISTORICAL_TRADES}+ historical tests.')
+                if not qualified:st.warning('No stocks passed the filters today. The app will not force a trade just to fill ten slots.')
+                progress.progress(1.0,text='MAXPROFIT calculation complete')
+                st.session_state.option_index=0
+                st.session_state.last_order_message=None
+        except Exception as e:
+            runner.markdown('## 🛑 **MAXPROFIT ERROR**')
+            st.error(f'MAXPROFIT encountered an error: {e}')
+if st.session_state.top10:
+    top=st.session_state.top10
+    if 'option_index' not in st.session_state:st.session_state.option_index=0
+    idx=st.session_state.option_index
+    st.header('🎯 ONE OPTION AT A TIME')
+    st.caption('Review one candidate. YES submits one paper order if the price and account checks pass. NO skips it and shows the next candidate.')
+    if idx>=len(top):
+        st.info('You have reviewed every qualifying option today. Run a new scan later for fresh candidates.')
+    else:
+        x=top[idx];t=x['Ticker'];current=float(x['Price']);trigger=float(x['Buy Trigger']);reference=float(x.get('Reference Average',trigger/(1-buy_drop/100)));target=trigger*(1+TARGET);stop=trigger*(1-STOP_LOSS)
+        with st.container(border=True):
+            st.caption(f'OPTION {idx+1} OF {len(top)}')
+            st.subheader(f'{t} · {"BUY SETUP" if current<=trigger else "WAIT FOR BUY PRICE"}')
+            a,b,c1=st.columns(3)
+            a.metric('Current price',f"${current:.2f}")
+            b.metric('20-day average',f"${reference:.2f}")
+            c1.metric('Buy only at or below',f"${trigger:.2f}",f"{(trigger/reference-1):+.1%} vs average")
+            st.write(f"**After a fill:** automatic take-profit at +{TARGET:.0%} of the actual fill price and protective stop at −{STOP_LOSS:.0%} of the actual fill price. The final prices are set by Alpaca's bracket order.")
+            st.write(f"**Historical target-hit rate:** {x['Win Rate']:.0%} across {x['Historical Trades']} tests")
+            st.write(f"**Average historical trade return:** {x['Expected Return']:+.1%} · **Typical hold:** {x['Typical Hold']} trading days")
+            st.caption('Historical performance is not a guarantee. Stop orders can execute below the stop price. Paper trading only.')
+            yes_col,no_col=st.columns(2)
+            if yes_col.button('✅ YES, BUY THIS OPTION',key=f'yes_option_{idx}_{t}',type='primary',use_container_width=True):
+                ac=account()
+                cash=float((ac or {}).get('cash',0) or 0);bp=float((ac or {}).get('buying_power',0) or 0)
+                spendable=min(max(0,cash),max(0,bp))
+                if not ac:st.error('Order blocked: cannot verify Alpaca PAPER account.')
+                elif spendable<=0:st.error(f'Order blocked. Paper cash ${cash:,.2f}; buying power ${bp:,.2f}. Account must be reconciled first.')
+                elif current>trigger:st.warning(f'No order sent. Current price ${current:.2f} is above the buy trigger ${trigger:.2f}. Choose NO to review the next option.')
+                else:
+                    budget=spendable*allocation/100
+                    ok,msg=buy(t,budget,trigger)
+                    if ok:
+                        st.success(msg)
+                        st.session_state.option_index=idx+1
+                    else:st.error(msg)
+            if no_col.button('❌ NO, SKIP THIS ONE',key=f'no_option_{idx}_{t}',use_container_width=True):
+                st.session_state.option_index=idx+1
+                st.rerun()
+    st.divider()
+    st.subheader('🧪 TEST THE STRATEGY BEFORE TRUSTING IT')
+    if st.button('📈 TEST WHETHER VAST CASH MAKES MONEY',use_container_width=True):
+        hist,_=all_hist()
+        if hist:
+            with st.spinner('Running the historical strategy test...'):
+                trades,stats=backtest_strategy(hist,buy_drop,capital)
+            if stats:
+                a,b,c1,d=st.columns(4)
+                a.metric('Starting',f"${stats['Starting Capital']:,.0f}")
+                b.metric('Ending',f"${stats['Ending Capital']:,.0f}")
+                c1.metric('Net Profit',f"${stats['Net Profit']:,.0f}")
+                d.metric('Max Drawdown',f"{stats['Max Drawdown']:.1%}")
+                st.write(f"**Trades:** {stats['Total Trades']} • **Win rate:** {stats['Win Rate']:.1%} • **Average trade:** {stats['Avg Trade Return']:+.2%} • **Best:** {stats['Best Trade']:+.2%} • **Worst:** {stats['Worst Trade']:+.2%}")
+                st.caption('Historical simulation only. It does not include all real-world trading costs and cannot guarantee future results.')
+                st.dataframe(trades,use_container_width=True,hide_index=True)
+            else:st.warning('No qualifying historical trades were found.')
+        else:st.error('Historical market data could not be loaded.')
+)
+        except Exception as e:return False,f'SIM trade error: {e}'
+    h=hdr()
+    if not h:return False,'Alpaca PAPER credentials unavailable.'
+    try:
+        a=requests.get(f'{TRADE}/v2/account',headers=h,timeout=10)
+        if a.status_code!=200:return False,f'PAPER BUY blocked: account check failed (HTTP {a.status_code}); no order submitted.'
+        ac=a.json()
+        cash=float(ac.get('cash',0) or 0)
+        buying_power=float(ac.get('buying_power',0) or 0)
+        # Never add to an existing holding or stack duplicate open buy orders.
+        pos=requests.get(f'{TRADE}/v2/positions/{symbol}',headers=h,timeout=10)
+        if pos.status_code==200:return False,f'PAPER BUY skipped for {symbol}: a position already exists; manage the existing position first.'
+        if pos.status_code not in (200,404):return False,f'PAPER BUY blocked: could not verify existing position (HTTP {pos.status_code}).'
+        open_orders=requests.get(f'{TRADE}/v2/orders',headers=h,params={'status':'open','symbols':symbol,'limit':100},timeout=10)
+        if open_orders.status_code!=200:return False,f'PAPER BUY blocked: could not verify open orders (HTTP {open_orders.status_code}).'
+        if any(o.get('side')=='buy' for o in open_orders.json()):return False,f'PAPER BUY skipped for {symbol}: an open buy order already exists.'
+        if cash<=0 or buying_power<=0:
+            return False,f'PAPER BUY blocked for {symbol}: cash ${cash:,.2f}, buying power ${buying_power:,.2f}. No order submitted.'.replace('$','\\$')
+        spendable=min(float(budget),cash,buying_power)
+        q=requests.get(f'{DATA}/v2/stocks/quotes/latest',headers=h,params={'symbols':symbol,'feed':'iex'},timeout=10);ask=0
+        if q.status_code==200:
+            quotes=q.json().get('quotes',{});quote=quotes.get(symbol,{})
+            ask=float(quote.get('ap') or 0);bid=float(quote.get('bp') or 0);ask=ask or bid
+        if ask<=0:
+            snap=requests.get(f'{DATA}/v2/stocks/{symbol}/snapshot',headers=h,params={'feed':'iex'},timeout=10)
+            if snap.status_code==200:
+                sd=snap.json();ask=float((sd.get('latestTrade') or {}).get('p') or (sd.get('dailyBar') or {}).get('c') or 0)
+        if ask<=0:return False,f'No usable price for {symbol}; no order submitted.'
+        if buy_trigger is not None and ask>float(buy_trigger):
+            return False,f'PAPER BUY skipped for {symbol}: current ask ${ask:.2f} is above buy trigger ${float(buy_trigger):.2f}.'.replace('$','\\$')
+        qty=int((spendable*0.98)/ask)
+        if qty<1:return False,f'PAPER BUY skipped for {symbol}: no whole share fits the safe budget of ${spendable:,.2f}.'.replace('$','\\$')
+        if qty*ask>spendable:return False,'PAPER BUY blocked: estimated cost exceeds budget; no order submitted.'
+        target=round(ask*(1+TARGET),2);stop=round(ask*(1-STOP_LOSS),2)
+        payload={'symbol':symbol,'qty':str(qty),'side':'buy','type':'market','time_in_force':'day','order_class':'bracket','take_profit':{'limit_price':f'{target:.2f}'},'stop_loss':{'stop_price':f'{stop:.2f}'}}
+        r=requests.post(f'{TRADE}/v2/orders',headers={**h,'Content-Type':'application/json'},json=payload,timeout=15)
+        if r.status_code not in (200,201):return False,f'PAPER BRACKET BUY rejected: {r.text[:200]}'
+        oid=r.json()['id'];st.session_state.setdefault('pending_orders',{})[oid]=symbol;fill=0;fq=0
+        for _ in range(12):
+            time.sleep(1);z=requests.get(f'{TRADE}/v2/orders/{oid}',headers=h,timeout=10)
+            if z.status_code==200:
+                o=z.json();fill=float(o.get('filled_avg_price') or 0);fq=int(float(o.get('filled_qty') or 0))
+                if fill>0 and fq>0:break
+        if not fill:return True,f'PAPER BUY submitted for {symbol}; fill still pending. VAST CASH will reconcile it automatically.'
+        target=round(fill*(1+TARGET),2)
+        stop=round(fill*(1-STOP_LOSS),2)
+        msg=f'PAPER BRACKET BUY {symbol}: {fq} shares @ ${fill:.2f}. Take-profit ${target:.2f} (+{TARGET:.0%}); protective stop ${stop:.2f} (-{STOP_LOSS:.0%}) submitted as attached exits.'
+        return True,msg
+    except Exception as e:return False,f'PAPER trade error: {e}'
+def show_positions_and_orders():
+    h=hdr()
+    if not h:
+        st.warning('Positions and order history unavailable until Alpaca PAPER credentials connect.')
+        return
+    try:
+        pr=requests.get(f'{TRADE}/v2/positions',headers=h,timeout=10)
+        if pr.status_code==200:
+            positions=pr.json()
+            st.subheader('📦 CURRENT PAPER POSITIONS')
+            if positions:
+                rows=[{'Symbol':p.get('symbol'),'Qty':p.get('qty'),'Side':p.get('side'),'Avg Entry':p.get('avg_entry_price'),'Current Price':p.get('current_price'),'Market Value':p.get('market_value'),'Unrealized P/L':p.get('unrealized_pl')} for p in positions]
+                st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+            else:st.info('No open stock positions reported by Alpaca.')
+        else:st.error(f'Could not retrieve positions (HTTP {pr.status_code}): {pr.text[:200]}')
+        oo=requests.get(f'{TRADE}/v2/orders',headers=h,params={'status':'open','limit':100,'direction':'desc'},timeout=10)
+        if oo.status_code==200:
+            orders=oo.json()
+            st.subheader('🧾 OPEN PAPER ORDERS')
+            if orders:
+                rows=[{'Symbol':o.get('symbol'),'Side':o.get('side'),'Qty':o.get('qty'),'Filled':o.get('filled_qty'),'Type':o.get('type'),'Limit Price':o.get('limit_price'),'Status':o.get('status'),'Submitted':o.get('submitted_at')} for o in orders]
+                st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+            else:st.info('No open orders reported by Alpaca.')
+        else:st.error(f'Could not retrieve open orders (HTTP {oo.status_code}): {oo.text[:200]}')
+        recent=requests.get(f'{TRADE}/v2/orders',headers=h,params={'status':'all','limit':20,'direction':'desc','nested':'true'},timeout=10)
+        if recent.status_code==200:
+            orders=recent.json()
+            st.subheader('🕘 RECENT PAPER ORDER HISTORY')
+            if orders:
+                rows=[{'Symbol':o.get('symbol'),'Side':o.get('side'),'Qty':o.get('qty'),'Filled':o.get('filled_qty'),'Avg Fill':o.get('filled_avg_price'),'Type':o.get('type'),'Status':o.get('status'),'Submitted':o.get('submitted_at')} for o in orders]
+                st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
+            else:st.info('No recent orders returned by Alpaca.')
+        else:st.error(f'Could not retrieve recent order history (HTTP {recent.status_code}): {recent.text[:200]}')
+    except Exception as e:st.error(f'Positions/order diagnostics failed: {e}')
+
+def show_account_diagnostics():
+    st.header('🧾 PAPER ACCOUNT DIAGNOSTICS')
+    ac,msg=account_diagnostics()
+    if not ac:
+        st.error(msg)
+        st.info('No brokerage balance is being invented or displayed. Check Streamlit Secrets and the Alpaca PAPER account connection.')
+        return
+    cols=st.columns(4)
+    cols[0].metric('💵 Cash',f"${float(ac.get('cash',0) or 0):,.2f}")
+    cols[1].metric('💰 Equity',f"${float(ac.get('equity',0) or 0):,.2f}")
+    cols[2].metric('🏦 Buying Power',f"${float(ac.get('buying_power',0) or 0):,.2f}")
+    cols[3].metric('📊 Portfolio Value',f"${float(ac.get('portfolio_value',0) or 0):,.2f}")
+    st.success('ACCOUNT MODE: ALPACA PAPER ACCOUNT')
+    st.caption('Values above are reported by the Alpaca paper-trading API.')
+    if float(ac.get('cash',0) or 0)<0 or float(ac.get('buying_power',0) or 0)<=0:
+        st.error('TRADING PAUSED: cash is negative or buying power is zero. New buys are blocked until the account is reconciled.')
+
+st.title('⚒️ VAST CASH');
+try:
+    reconciled=reconcile_pending()
+    for msg in reconciled:st.success('🔄 '+msg)
+except Exception:
+    pass
+show_account_diagnostics()
+with st.expander('🔎 Account details (optional)',expanded=False):
+    show_positions_and_orders()
+st.divider()
+st.subheader('STOCK TRADING FOR WELDERS')
+st.caption('One choice at a time. Press YES to submit a paper trade if the checks pass, or NO to skip it.')
+with st.sidebar:
+    buy_drop=st.slider('Buy % below 20-day average',1,10,5);target_choice=st.selectbox('Profit target',options=[5,10],index=0,format_func=lambda v:f'+{v}%');TARGET=target_choice/100;capital=st.number_input('Backtest starting capital ($)',100.,1000000.,1000000.,100.);allocation=st.slider('Account balance to risk per approved trade (%)',1,5,2,1)
+    st.caption(f'PAPER ONLY. Take-profit +{TARGET:.0%}; protective stop −{STOP_LOSS:.0%}. You approve each trade with YES. NO skips it.')
+if 'top10' not in st.session_state:st.session_state.top10=None
+if 'decisions' not in st.session_state:st.session_state.decisions={}
+if 'pending_orders' not in st.session_state:st.session_state.pending_orders={}
+if st.button('🔎 FIND MY BEST OPTION TODAY',type='primary',use_container_width=True):
+    if not hdr():
+        st.error('Alpaca PAPER credentials are not available. Check Streamlit Secrets.')
+    else:
+        runner=st.empty()
+        status=st.empty()
+        progress=st.progress(0,text='MAXPROFIT is starting...')
+        try:
+            runner.markdown('## 🏃‍♂️💨 **MAXPROFIT RUNNING**')
+            status.info('🏃 Fetching historical market data from Alpaca PAPER...')
+            hist, hist_status=all_hist()
+            if not hist:
+                progress.progress(0,text='MAXPROFIT stopped')
+                runner.markdown('## 🛑 **MAXPROFIT STOPPED**')
+                st.error(f'No historical market data was returned. {hist_status}')
+                st.code(hist_status, language='text')
+                st.info('MAXPROFIT did not submit or modify any order. This is a market-data retrieval failure.')
+            else:
+                ranked=[]
+                total=len(hist)
+                for i,(s,d) in enumerate(hist.items(),1):
+                    runner.markdown(f'## 🏃‍♂️💨 **MAXPROFIT RUNNING**  ·  {s}  ·  {i}/{total}')
+                    status.info(f'🔧 Testing {s}: historical +{TARGET:.0%} target hits, win rate and volatility...')
+                    x=score(s,d,buy_drop)
+                    if x:ranked.append(x)
+                    progress.progress(i/total,text=f'Calculating MAXPROFIT: {i}/{total} stocks')
+                # Rank by score, then expected return and win rate. Keep the full trade plan with each pick.
+                qualified=[x for x in ranked if x['Expected Return']>0 and x['Win Rate']>=MIN_WIN_RATE and x['Historical Trades']>=MIN_HISTORICAL_TRADES]
+                qualified.sort(key=lambda x:(x['Score'],x['Expected Return'],x['Win Rate']),reverse=True)
+                st.session_state.top10=qualified[:10]
+                st.session_state.decisions={x['Ticker']:None for x in st.session_state.top10}
+                runner.markdown('## ✅ **MAXPROFIT COMPLETE**')
+                st.caption(f'📊 {hist_status}')
+                status.success(f'Checked {total} stocks. {len(qualified)} passed the filters: positive historical average return, at least {MIN_WIN_RATE:.0%} target-hit rate, and {MIN_HISTORICAL_TRADES}+ historical tests.')
+                if not qualified:st.warning('No stocks passed the filters today. The app will not force a trade just to fill ten slots.')
+                progress.progress(1.0,text='MAXPROFIT calculation complete')
+                st.session_state.option_index=0
+                st.session_state.last_order_message=None
+        except Exception as e:
+            runner.markdown('## 🛑 **MAXPROFIT ERROR**')
+            st.error(f'MAXPROFIT encountered an error: {e}')
+if st.session_state.top10:
+    top=st.session_state.top10
+    if 'option_index' not in st.session_state:st.session_state.option_index=0
+    idx=st.session_state.option_index
+    st.header('🎯 ONE OPTION AT A TIME')
+    st.caption('Review one candidate. YES submits one paper order if the price and account checks pass. NO skips it and shows the next candidate.')
+    if idx>=len(top):
+        st.info('You have reviewed every qualifying option today. Run a new scan later for fresh candidates.')
+    else:
+        x=top[idx];t=x['Ticker'];current=float(x['Price']);trigger=float(x['Buy Trigger']);reference=float(x.get('Reference Average',trigger/(1-buy_drop/100)));target=trigger*(1+TARGET);stop=trigger*(1-STOP_LOSS)
         with st.container(border=True):
             st.caption(f'OPTION {idx+1} OF {len(top)}')
             st.subheader(f'{t} · {"BUY SETUP" if current<=trigger else "WAIT FOR BUY PRICE"}')
