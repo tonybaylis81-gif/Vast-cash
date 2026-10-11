@@ -414,15 +414,15 @@ if st.session_state.top10:
     if idx>=len(top):
         st.info('You have reviewed every qualifying option today. Run a new scan later for fresh candidates.')
     else:
-        x=top[idx];t=x['Ticker'];current=float(x['Price']);trigger=float(x['Buy Trigger']);target=trigger*(1+TARGET);stop=trigger*(1-STOP_LOSS)
+        x=top[idx];t=x['Ticker'];current=float(x['Price']);trigger=float(x['Buy Trigger']);reference=float(x.get('Reference Average',trigger/(1-0.05)));target=trigger*(1+TARGET);stop=trigger*(1-STOP_LOSS)
         with st.container(border=True):
             st.caption(f'OPTION {idx+1} OF {len(top)}')
             st.subheader(f'{t} · {"BUY SETUP" if current<=trigger else "WAIT FOR BUY PRICE"}')
             a,b,c1=st.columns(3)
             a.metric('Current price',f"${current:.2f}")
-            b.metric('Buy only at or below',f"${trigger:.2f}")
-            c1.metric('Profit target',f"${target:.2f}",f"+{TARGET:.0%}")
-            st.write(f"**Protective stop trigger:** ${stop:.2f} (−{STOP_LOSS:.0%})")
+            b.metric('20-day average',f"${reference:.2f}")
+            c1.metric('Buy only at or below',f"${trigger:.2f}",f"{(trigger/reference-1):+.1%} vs average")
+            st.write(f"**After a fill:** automatic take-profit at +{TARGET:.0%} of the actual fill price and protective stop at −{STOP_LOSS:.0%} of the actual fill price. The final prices are set by Alpaca's bracket order.")
             st.write(f"**Historical target-hit rate:** {x['Win Rate']:.0%} across {x['Historical Trades']} tests")
             st.write(f"**Average historical trade return:** {x['Expected Return']:+.1%} · **Typical hold:** {x['Typical Hold']} trading days")
             st.caption('Historical performance is not a guarantee. Stop orders can execute below the stop price. Paper trading only.')
