@@ -99,33 +99,51 @@ def all_hist():
     except Exception as e:
         return {}, f'Unexpected historical-data error: {e}'
 def score(s,d,buy_drop):
+    # Use a 20-session moving average as the reference. Stops are conservatively
+    # assumed to trigger first if both stop and target occur in one daily candle.
     if len(d)<140:return None
     wins=[];rets=[];hs=[];start=70;stop=len(d)-2;step=max(1,(stop-start)//90)
     for i in range(start,stop,step):
-        prior=d.iloc[max(0,i-60):i];trigger=float(prior['high'].max())*(1-buy_drop/100);fut=d.iloc[i:i+31];hits=np.where(fut['low'].to_numpy()<=trigger)[0]
+        prior=d.iloc[max(0,i-20):i]
+        if len(prior)<20:continue
+        reference=float(prior['close'].mean());entry=reference*(1-buy_drop/100)
+        fut=d.iloc[i:i+31];hits=np.where(fut['low'].to_numpy()<=entry)[0]
         if not len(hits):continue
-        a=fut.iloc[int(hits[0]):int(hits[0])+31];th=np.where(a['high'].to_numpy()>=trigger*(1+TARGET))[0]
-        if len(th):wins.append(1);rets.append(TARGET);hs.append(max(1,int(th[0])))
-        else:wins.append(0);rets.append(float(a.close.iloc[-1]/trigger-1));hs.append(len(a)-1)
+        a=fut.iloc[int(hits[0]):int(hits[0])+31]
+        target=entry*(1+TARGET);protective_stop=entry*(1-STOP_LOSS);result=None;hold=1
+        for day,row in enumerate(a.itertuples(),1):
+            if float(row.low)<=protective_stop:
+                result=-STOP_LOSS;hold=day;break
+            if float(row.high)>=target:
+                result=TARGET;hold=day;break
+        if result is None:
+            result=float(a.close.iloc[-1]/entry-1);hold=max(1,len(a))
+        rets.append(result);wins.append(1 if result>0 else 0);hs.append(hold)
     if len(rets)<4:return None
-    c=d.close;price=float(c.iloc[-1]);recent=float(c.tail(60).max());trigger=recent*(1-buy_drop/100);win=float(np.mean(wins));ret=float(np.mean(rets));vol=float(c.pct_change().dropna().tail(30).std()*np.sqrt(252));momentum=float(price/c.iloc[-21]-1);typical=max(1,int(round(np.mean(hs))))
-    return {'Ticker':s,'Expected Return':ret,'Win Rate':win,'Historical Trades':len(rets),'Typical Hold':typical,'Price':price,'Buy Trigger':trigger,'Sell Target':trigger*(1+TARGET),'Stop Loss':trigger*(1-STOP_LOSS),'Momentum':momentum,'Volatility':vol,'Score':ret*100+win*20-vol*5}
+    closes=d.close;price=float(closes.iloc[-1]);reference=float(closes.tail(20).mean());trigger=reference*(1-buy_drop/100)
+    win=float(np.mean(wins));ret=float(np.mean(rets));vol=float(closes.pct_change().dropna().tail(30).std()*np.sqrt(252));momentum=float(price/closes.iloc[-21]-1);typical=max(1,int(round(np.mean(hs))))
+    return {'Ticker':s,'Expected Return':ret,'Win Rate':win,'Historical Trades':len(rets),'Typical Hold':typical,'Price':price,'Reference Average':reference,'Buy Trigger':trigger,'Sell Target':trigger*(1+TARGET),'Stop Loss':trigger*(1-STOP_LOSS),'Momentum':momentum,'Volatility':vol,'Score':ret*100+win*20-vol*5}
 def backtest_strategy(hist,buy_drop,starting_cash=SIMULATED_BUYING_POWER):
-    # Historical walk-forward test. Each entry uses only data available before that day.
-    cash=float(starting_cash); trades=[]
+    # Walk-forward simulation using the same moving-average entry and bracket exits.
+    trades=[]
     for s,d in hist.items():
-        if len(d)<140: continue
+        if len(d)<140:continue
         for i in range(70,len(d)-31):
-            prior=d.iloc[max(0,i-60):i]
-            trigger=float(prior['high'].max())*(1-buy_drop/100)
-            fut=d.iloc[i:i+31]
-            hits=np.where(fut['low'].to_numpy()<=trigger)[0]
-            if not len(hits): continue
-            entry=trigger; entry_i=int(hits[0]); a=fut.iloc[entry_i:entry_i+31]
-            target=entry*(1+TARGET)
-            th=np.where(a['high'].to_numpy()>=target)[0]
-            if len(th): exit_price=target; hold=max(1,int(th[0])); outcome='WIN'
-            else: exit_price=float(a['close'].iloc[-1]); hold=max(1,len(a)-1); outcome='LOSS' if exit_price<entry else 'FLAT'
+            prior=d.iloc[max(0,i-20):i]
+            if len(prior)<20:continue
+            reference=float(prior['close'].mean());entry=reference*(1-buy_drop/100)
+            fut=d.iloc[i:i+31];hits=np.where(fut['low'].to_numpy()<=entry)[0]
+            if not len(hits):continue
+            a=fut.iloc[int(hits[0]):int(hits[0])+31]
+            target=entry*(1+TARGET);protective_stop=entry*(1-STOP_LOSS);exit_price=None;hold=1;outcome='TIME EXIT'
+            for day,row in enumerate(a.itertuples(),1):
+                if float(row.low)<=protective_stop:
+                    exit_price=protective_stop;hold=day;outcome='STOP LOSS';break
+                if float(row.high)>=target:
+                    exit_price=target;hold=day;outcome='TAKE PROFIT';break
+            if exit_price is None:
+                exit_price=float(a['close'].iloc[-1]);hold=max(1,len(a))
+                outcome='WIN' if exit_price>entry else ('LOSS' if exit_price<entry else 'FLAT')
             trades.append({'Ticker':s,'Entry':entry,'Exit':exit_price,'Return':exit_price/entry-1,'Hold Days':hold,'Outcome':outcome})
     if not trades:return pd.DataFrame(),{}
     td=pd.DataFrame(trades).sort_values(['Ticker','Hold Days']).reset_index(drop=True)
