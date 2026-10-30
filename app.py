@@ -334,6 +334,8 @@ def show_positions_and_orders():
         st.warning('Positions and order history unavailable until Alpaca PAPER credentials connect.')
         return
     try:
+        if st.button('🔄 REFRESH POSITIONS',key='refresh_paper_positions'):
+            st.rerun()
         pr=requests.get(f'{TRADE}/v2/positions',headers=h,timeout=10)
         if pr.status_code==200:
             positions=pr.json()
@@ -349,14 +351,14 @@ def show_positions_and_orders():
                     if right.button(f'🔻 SELL {symbol}',key=f'sell_position_{symbol}',use_container_width=True):
                         ok,msg=submit_paper_sell(symbol)
                         (st.success if ok else st.error)(msg)
-                        if ok:st.rerun()
+                        # Keep the API response visible for review.
                 st.divider()
                 st.warning('SELL ALL closes every open position in this Alpaca PAPER account and requests cancellation of open orders first. This can realize losses.')
                 confirm=st.checkbox('I confirm: liquidate ALL positions in this PAPER account',key='confirm_sell_all_paper')
                 if st.button('🚨 SELL ALL PAPER POSITIONS',type='primary',disabled=not confirm,use_container_width=True):
                     ok,msg=submit_paper_sell_all()
                     (st.success if ok else st.error)(msg)
-                    if ok:st.rerun()
+                    # Keep the API response visible for review.
             else:st.success('No open stock positions reported by Alpaca. Nothing to sell.')
         else:st.error(f'Could not retrieve positions (HTTP {pr.status_code}): {pr.text[:200]}')
         oo=requests.get(f'{TRADE}/v2/orders',headers=h,params={'status':'open','limit':100,'direction':'desc'},timeout=10)
