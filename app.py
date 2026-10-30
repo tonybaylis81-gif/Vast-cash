@@ -462,56 +462,6 @@ if st.session_state.top10:
                 st.dataframe(trades,use_container_width=True,hide_index=True)
             else:st.warning('No qualifying historical trades were found.')
         else:st.error('Historical market data could not be loaded.')
-,'\\
-        except Exception as e:return False,f'SIM trade error: {e}'
-    h=hdr()
-    if not h:return False,'Alpaca PAPER credentials unavailable.'
-    try:
-        a=requests.get(f'{TRADE}/v2/account',headers=h,timeout=10)
-        if a.status_code!=200:return False,f'PAPER BUY blocked: account check failed (HTTP {a.status_code}); no order submitted.'
-        ac=a.json()
-        cash=float(ac.get('cash',0) or 0)
-        buying_power=float(ac.get('buying_power',0) or 0)
-        # Never add to an existing holding or stack duplicate open buy orders.
-        pos=requests.get(f'{TRADE}/v2/positions/{symbol}',headers=h,timeout=10)
-        if pos.status_code==200:return False,f'PAPER BUY skipped for {symbol}: a position already exists; manage the existing position first.'
-        if pos.status_code not in (200,404):return False,f'PAPER BUY blocked: could not verify existing position (HTTP {pos.status_code}).'
-        open_orders=requests.get(f'{TRADE}/v2/orders',headers=h,params={'status':'open','symbols':symbol,'limit':100},timeout=10)
-        if open_orders.status_code!=200:return False,f'PAPER BUY blocked: could not verify open orders (HTTP {open_orders.status_code}).'
-        if any(o.get('side')=='buy' for o in open_orders.json()):return False,f'PAPER BUY skipped for {symbol}: an open buy order already exists.'
-        if cash<=0 or buying_power<=0:
-            return False,f'PAPER BUY blocked for {symbol}: cash ${cash:,.2f}, buying power ${buying_power:,.2f}. No order submitted.'.replace('$','\\$')
-        spendable=min(float(budget),cash,buying_power)
-        q=requests.get(f'{DATA}/v2/stocks/quotes/latest',headers=h,params={'symbols':symbol,'feed':'iex'},timeout=10);ask=0
-        if q.status_code==200:
-            quotes=q.json().get('quotes',{});quote=quotes.get(symbol,{})
-            ask=float(quote.get('ap') or 0);bid=float(quote.get('bp') or 0);ask=ask or bid
-        if ask<=0:
-            snap=requests.get(f'{DATA}/v2/stocks/{symbol}/snapshot',headers=h,params={'feed':'iex'},timeout=10)
-            if snap.status_code==200:
-                sd=snap.json();ask=float((sd.get('latestTrade') or {}).get('p') or (sd.get('dailyBar') or {}).get('c') or 0)
-        if ask<=0:return False,f'No usable price for {symbol}; no order submitted.'
-        if buy_trigger is not None and ask>float(buy_trigger):
-            return False,f'PAPER BUY skipped for {symbol}: current ask ${ask:.2f} is above buy trigger ${float(buy_trigger):.2f}.'.replace('$','\\$')
-        qty=int((spendable*0.98)/ask)
-        if qty<1:return False,f'PAPER BUY skipped for {symbol}: no whole share fits the safe budget of ${spendable:,.2f}.'.replace('$','\\$')
-        if qty*ask>spendable:return False,'PAPER BUY blocked: estimated cost exceeds budget; no order submitted.'
-        target=round(ask*(1+TARGET),2);stop=round(ask*(1-STOP_LOSS),2)
-        payload={'symbol':symbol,'qty':str(qty),'side':'buy','type':'market','time_in_force':'day','order_class':'bracket','take_profit':{'limit_price':f'{target:.2f}'},'stop_loss':{'stop_price':f'{stop:.2f}'}}
-        r=requests.post(f'{TRADE}/v2/orders',headers={**h,'Content-Type':'application/json'},json=payload,timeout=15)
-        if r.status_code not in (200,201):return False,f'PAPER BRACKET BUY rejected: {r.text[:200]}'
-        oid=r.json()['id'];st.session_state.setdefault('pending_orders',{})[oid]=symbol;fill=0;fq=0
-        for _ in range(12):
-            time.sleep(1);z=requests.get(f'{TRADE}/v2/orders/{oid}',headers=h,timeout=10)
-            if z.status_code==200:
-                o=z.json();fill=float(o.get('filled_avg_price') or 0);fq=int(float(o.get('filled_qty') or 0))
-                if fill>0 and fq>0:break
-        if not fill:return True,f'PAPER BUY submitted for {symbol}; fill still pending. VAST CASH will reconcile it automatically.'
-        target=round(fill*(1+TARGET),2)
-        stop=round(fill*(1-STOP_LOSS),2)
-        msg=f'PAPER BRACKET BUY {symbol}: {fq} shares @ ${fill:.2f}. Take-profit ${target:.2f} (+{TARGET:.0%}); protective stop ${stop:.2f} (-{STOP_LOSS:.0%}) submitted as attached exits.'
-        return True,msg
-    except Exception as e:return False,f'PAPER trade error: {e}'
 def show_positions_and_orders():
     h=hdr()
     if not h:
