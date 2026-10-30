@@ -295,7 +295,8 @@ def buy(symbol,budget,buy_trigger=None):
         return True,msg
     except Exception as e:return False,f'PAPER trade error: {e}'
 def submit_paper_sell(symbol):
-    # Explicit user-triggered market liquidation of one Alpaca PAPER position.
+    # Cancel share-reserving exit orders, verify cancellation, then liquidate.
+    # This is deliberately sequential: never submit a close while shares remain held.
     h=hdr()
     if not h:return False,'Alpaca PAPER credentials unavailable. No sell submitted.'
     symbol=str(symbol).strip().upper()
@@ -305,11 +306,62 @@ def submit_paper_sell(symbol):
         if check.status_code!=200:return False,f'{symbol}: position check failed (HTTP {check.status_code}). No sell submitted.'
         p=check.json();qty=float(p.get('qty') or 0)
         if qty==0:return False,f'{symbol}: no open position quantity found.'
-        r=requests.delete(f'{TRADE}/v2/positions/{symbol}',headers=h,timeout=20)
-        if r.status_code not in (200,202):return False,f'{symbol}: sell request rejected (HTTP {r.status_code}): {r.text[:250]}'
+
+        # Nested responses include bracket legs. Cancel only SELL orders for this
+        # symbol, leaving unrelated BUY orders and other holdings untouched.
+        response=requests.get(f'{TRADE}/v2/orders',headers=h,
+            params={'status':'open','symbols':symbol,'limit':500,'nested':'true','direction':'desc'},timeout=15)
+        if response.status_code!=200:
+            return False,f'{symbol}: could not inspect open orders (HTTP {response.status_code}). No sell submitted.'
+        found={}
+        def collect_sell_orders(items):
+            for item in items or []:
+                if not isinstance(item,dict):continue
+                if item.get('symbol')==symbol and item.get('side')=='sell' and item.get('id'):
+                    found[str(item['id'])]=item
+                legs=item.get('legs') or []
+                if isinstance(legs,list):collect_sell_orders(legs)
+        collect_sell_orders(response.json())
+
+        canceled=[]
+        for order_id,order in found.items():
+            cancel=requests.delete(f'{TRADE}/v2/orders/{order_id}',headers=h,timeout=15)
+            if cancel.status_code not in (200,202,204):
+                return False,f'{symbol}: could not cancel share-reserving exit order {order_id} (HTTP {cancel.status_code}). No liquidation submitted; shares are protected.'
+            canceled.append(order_id)
+
+        # Wait for Alpaca to confirm each cancellation. If an exit filled while
+        # cancellation was in flight, refresh the position before closing it.
+        for order_id in canceled:
+            terminal=False
+            for attempt in range(10):
+                state=requests.get(f'{TRADE}/v2/orders/{order_id}',headers=h,timeout=10)
+                if state.status_code!=200:
+                    return False,f'{symbol}: cancellation was requested but order {order_id} could not be verified. No liquidation submitted.'
+                status=str(state.json().get('status','')).lower()
+                if status in ('canceled','expired','rejected','filled'):
+                    terminal=True
+                    break
+                time.sleep(1)
+            if not terminal:
+                return False,f'{symbol}: exit order {order_id} is still {status}. No liquidation submitted; refresh and retry.'
+
+        # Re-read actual position after exits are canceled or have filled.
+        check=requests.get(f'{TRADE}/v2/positions/{symbol}',headers=h,timeout=10)
+        if check.status_code==404:
+            return True,f'{symbol}: an exit order filled while cancellation was processing. No remaining position to sell.'
+        if check.status_code!=200:
+            return False,f'{symbol}: could not re-check remaining shares (HTTP {check.status_code}). No liquidation submitted.'
+        p=check.json();qty=float(p.get('qty') or 0)
+        if qty==0:return True,f'{symbol}: no remaining shares after the existing exit order completed.'
+
+        r=requests.delete(f'{TRADE}/v2/positions/{symbol}',headers=h,params={'cancel_orders':'true'},timeout=20)
+        if r.status_code not in (200,202):
+            return False,f'{symbol}: sell request rejected (HTTP {r.status_code}): {r.text[:250]}'
         order=r.json() if r.content else {}
-        return True,f'{symbol}: market liquidation order submitted for {abs(qty):g} shares. Order ID: {order.get("id","returned by Alpaca")}. Check order status for fill confirmation.'
-    except Exception as e:return False,f'{symbol}: sell request failed: {e}'
+        detail=f' Canceled and verified {len(canceled)} existing sell order(s).' if canceled else ' No conflicting open sell orders were found.'
+        return True,f'{symbol}: market liquidation order submitted for {abs(qty):g} remaining shares.{detail} Order ID: {order.get("id","returned by Alpaca")}. Check order status for fill confirmation.'
+    except Exception as e:return False,f'{symbol}: sell request failed safely: {e}'
 
 def submit_paper_sell_all():
     # Account-wide close. The UI previews holdings and requires an explicit confirmation.
