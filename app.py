@@ -294,6 +294,40 @@ def buy(symbol,budget,buy_trigger=None):
         msg=f'PAPER BRACKET BUY {symbol}: {fq} shares @ ${fill:.2f}. Take-profit ${target:.2f} (+{TARGET:.0%}); protective stop ${stop:.2f} (-{STOP_LOSS:.0%}) submitted as attached exits.'
         return True,msg
     except Exception as e:return False,f'PAPER trade error: {e}'
+def submit_paper_sell(symbol):
+    # Explicit user-triggered market liquidation of one Alpaca PAPER position.
+    h=hdr()
+    if not h:return False,'Alpaca PAPER credentials unavailable. No sell submitted.'
+    symbol=str(symbol).strip().upper()
+    if not symbol:return False,'Missing symbol. No sell submitted.'
+    try:
+        check=requests.get(f'{TRADE}/v2/positions/{symbol}',headers=h,timeout=10)
+        if check.status_code!=200:return False,f'{symbol}: position check failed (HTTP {check.status_code}). No sell submitted.'
+        p=check.json();qty=float(p.get('qty') or 0)
+        if qty==0:return False,f'{symbol}: no open position quantity found.'
+        r=requests.delete(f'{TRADE}/v2/positions/{symbol}',headers=h,timeout=20)
+        if r.status_code not in (200,202):return False,f'{symbol}: sell request rejected (HTTP {r.status_code}): {r.text[:250]}'
+        order=r.json() if r.content else {}
+        return True,f'{symbol}: market liquidation order submitted for {abs(qty):g} shares. Order ID: {order.get("id","returned by Alpaca")}. Check order status for fill confirmation.'
+    except Exception as e:return False,f'{symbol}: sell request failed: {e}'
+
+def submit_paper_sell_all():
+    # Account-wide close. The UI previews holdings and requires an explicit confirmation.
+    h=hdr()
+    if not h:return False,'Alpaca PAPER credentials unavailable. No sell submitted.'
+    try:
+        p=requests.get(f'{TRADE}/v2/positions',headers=h,timeout=10)
+        if p.status_code!=200:return False,f'Could not verify positions (HTTP {p.status_code}). No sell submitted.'
+        holdings=p.json()
+        if not holdings:return True,'No open positions to liquidate.'
+        symbols=', '.join(str(x.get('symbol','?')) for x in holdings)
+        r=requests.delete(f'{TRADE}/v2/positions',headers=h,params={'cancel_orders':'true'},timeout=30)
+        if r.status_code not in (200,207):return False,f'Close-all request returned HTTP {r.status_code}: {r.text[:400]}'
+        try:details=r.json()
+        except Exception:details=[]
+        return True,f'Close-all request submitted for {len(holdings)} positions ({symbols}). Alpaca response: {details}'
+    except Exception as e:return False,f'Close-all request failed: {e}'
+
 def show_positions_and_orders():
     h=hdr()
     if not h:
@@ -307,7 +341,23 @@ def show_positions_and_orders():
             if positions:
                 rows=[{'Symbol':p.get('symbol'),'Qty':p.get('qty'),'Side':p.get('side'),'Avg Entry':p.get('avg_entry_price'),'Current Price':p.get('current_price'),'Market Value':p.get('market_value'),'Unrealized P/L':p.get('unrealized_pl')} for p in positions]
                 st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
-            else:st.info('No open stock positions reported by Alpaca.')
+                st.caption('SELL submits a market liquidation order to the Alpaca PAPER account. It may realize a loss. A request is not a confirmed fill.')
+                for p in positions:
+                    symbol=str(p.get('symbol','')).upper();qty=p.get('qty','?');pl=p.get('unrealized_pl','?')
+                    left,right=st.columns([4,1])
+                    left.write(f'**{symbol}** · Qty {qty} · Unrealized P/L ${pl}')
+                    if right.button(f'🔻 SELL {symbol}',key=f'sell_position_{symbol}',use_container_width=True):
+                        ok,msg=submit_paper_sell(symbol)
+                        (st.success if ok else st.error)(msg)
+                        if ok:st.rerun()
+                st.divider()
+                st.warning('SELL ALL closes every open position in this Alpaca PAPER account and requests cancellation of open orders first. This can realize losses.')
+                confirm=st.checkbox('I confirm: liquidate ALL positions in this PAPER account',key='confirm_sell_all_paper')
+                if st.button('🚨 SELL ALL PAPER POSITIONS',type='primary',disabled=not confirm,use_container_width=True):
+                    ok,msg=submit_paper_sell_all()
+                    (st.success if ok else st.error)(msg)
+                    if ok:st.rerun()
+            else:st.success('No open stock positions reported by Alpaca. Nothing to sell.')
         else:st.error(f'Could not retrieve positions (HTTP {pr.status_code}): {pr.text[:200]}')
         oo=requests.get(f'{TRADE}/v2/orders',headers=h,params={'status':'open','limit':100,'direction':'desc'},timeout=10)
         if oo.status_code==200:
@@ -353,7 +403,7 @@ try:
 except Exception:
     pass
 show_account_diagnostics()
-with st.expander('🔎 Account details (optional)',expanded=False):
+with st.expander('🔎 Account details and SELL CONTROLS',expanded=True):
     show_positions_and_orders()
 st.divider()
 st.subheader('STOCK TRADING FOR WELDERS')
