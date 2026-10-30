@@ -3,7 +3,7 @@ from collections.abc import Mapping
 from datetime import datetime,timedelta,timezone
 import numpy as np,pandas as pd,requests,streamlit as st
 st.set_page_config(page_title='VAST CASH',page_icon='⚒️',layout='wide')
-PAPER_ONLY=True; SIM_MODE=False; SIMULATED_BUYING_POWER=5000.00; DATA='https://data.alpaca.markets'; TRADE='https://paper-api.alpaca.markets'; TARGET=0.05; STOP_LOSS=0.03; MIN_WIN_RATE=0.60; MIN_HISTORICAL_TRADES=6
+PAPER_ONLY=True; SIM_MODE=False; SIMULATED_BUYING_POWER=5000.00; DATA='https://data.alpaca.markets'; TRADE='https://paper-api.alpaca.markets'; TARGET=0.02; STOP_LOSS=0.01; MIN_WIN_RATE=0.60; MIN_HISTORICAL_TRADES=6
 UNIVERSE=['AAPL','MSFT','NVDA','AMZN','META','GOOGL','GOOG','AVGO','TSLA','AMD','NFLX','ORCL','CRM','ADBE','QCOM','INTC','MU','AMAT','LRCX','TXN','JPM','BAC','WFC','GS','MS','V','MA','C','JNJ','UNH','XOM','CVX','COST','WMT','HD','LOW','CAT','GE','BA','DIS']
 def secret(names):
     names={x.upper() for x in names}
@@ -411,8 +411,8 @@ st.divider()
 st.subheader('STOCK TRADING FOR WELDERS')
 st.caption('One choice at a time. Press YES to submit a paper trade if the checks pass, or NO to skip it.')
 with st.sidebar:
-    buy_drop=st.slider('Buy % below 20-day average',1,10,5);target_choice=st.selectbox('Profit target',options=[5,10],index=0,format_func=lambda v:f'+{v}%');TARGET=target_choice/100;capital=st.number_input('Backtest starting capital ($)',100.,1000000.,1000000.,100.);allocation=st.slider('Account balance to risk per approved trade (%)',1,5,2,1)
-    st.caption(f'PAPER ONLY. Take-profit +{TARGET:.0%}; protective stop −{STOP_LOSS:.0%}. You approve each trade with YES. NO skips it.')
+    buy_drop=st.slider('Buy % below 20-day average',1,10,5);capital=st.number_input('Backtest starting capital ($)',100.,1000000.,1000000.,100.);allocation=st.slider('Account balance to risk per approved trade (%)',1,5,2,1)
+    st.caption(f'PAPER ONLY. Fixed exits: automatic take-profit +{TARGET:.0%}; automatic protective stop −{STOP_LOSS:.0%}. You approve each new trade with YES. NO skips it.')
 if 'top10' not in st.session_state:st.session_state.top10=None
 if 'decisions' not in st.session_state:st.session_state.decisions={}
 if 'pending_orders' not in st.session_state:st.session_state.pending_orders={}
